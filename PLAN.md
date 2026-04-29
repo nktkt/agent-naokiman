@@ -123,10 +123,12 @@ agent-naokiman/
 - [ ] チャンク逐次表示、`tool_calls` の組立て
 - [ ] Ctrl+C で中断
 
-### Phase 6 — 権限とサンドボックス（1〜2日）
-- [ ] 書込/bash 実行前の確認プロンプト
-- [ ] 危険コマンド検出（`rm -rf`, `curl|sh` 等）
-- [ ] allowlist の永続化
+### Phase 6 — 権限とサンドボックス（部分完了）
+- [x] `bash` / `write_file` / `edit_file` 実行前の対話プロンプト
+- [x] セッション内 allowlist（exact-match と tool 単位 blanket）
+- [x] `--yes` で自動承認、非 TTY 時は自動 deny
+- [ ] 危険コマンド検出（`rm -rf`, `curl|sh` 等）— 後続
+- [ ] allowlist の永続化（`~/.config/agent-naokiman/allowed.json`）— 後続
 
 ### Phase 7 — TUI/REPL 改善（任意、数日）
 - [ ] マルチライン入力

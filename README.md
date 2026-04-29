@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0–4 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools (`read_file`, `write_file`, `edit_file`, `bash`, `ls`, `glob`, `grep`), and provider switching across DeepSeek, Moonshot Kimi, and Alibaba Qwen. Streaming and TUI polish are not yet implemented.
+> **Status**: Early prototype. Phases 0–4 + 6 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools, provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, and per-tool approval prompts before destructive operations. Streaming and TUI polish are not yet implemented.
 
 ## Goals
 
@@ -133,7 +133,25 @@ Available tools (the LLM picks them automatically):
 
 The model decides when to call tools. Each invocation is logged as `[tool] name(args)` lines; the final natural-language answer is on stdout.
 
-> **Warning**: the `bash` and `write_file` tools run with no confirmation prompt. Don't aim them at production systems until permission prompts (Phase 6) are in place.
+### Permissions
+
+`bash`, `write_file`, and `edit_file` require interactive approval before each call. When you run `naokiman` in a terminal you'll see:
+
+```
+[approval needed] tool: bash
+  args: {"command": "rm -rf /tmp/foo"}
+  1) yes, just this once
+  2) yes, remember this exact command for the session
+  3) yes, allow ALL bash calls for the session
+  4) no, deny
+choice [1-4, default 4]:
+```
+
+Press `1` / `y` to allow this single call, `2` / `e` to remember the exact `(tool, args)` pair, `3` / `a` to blanket-allow the tool, anything else (or just Enter) to deny.
+
+When stdin is not a TTY (piped input, CI), all destructive calls are denied automatically. Pass `--yes` / `-y` to auto-approve in trusted automated contexts.
+
+Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 
 ## Roadmap
 
@@ -142,6 +160,7 @@ The model decides when to call tools. Each invocation is logged as `[tool] name(
 - **Phase 2** — Tool-use loop with `read_file` and `bash` ✅
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `ls`, `glob`, `grep` ✅
 - **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
+- **Phase 6** — Approval prompts for destructive tools ✅ (allowlist persistence + dangerous-command detection still TODO)
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
@@ -163,6 +182,7 @@ agent-naokiman/
     ├── message.zig         # Message tagged union + tool_calls serialization
     ├── chat.zig            # OpenAI-compatible chat client (DeepSeek/Kimi/Qwen)
     ├── provider.zig        # Provider kind enum + per-provider config selection
+    ├── perm.zig            # Approval policy + interactive prompt
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig

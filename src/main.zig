@@ -4,6 +4,7 @@ const message = @import("message.zig");
 const chat = @import("chat.zig");
 const provider = @import("provider.zig");
 const tools = @import("tools/mod.zig");
+const perm = @import("perm.zig");
 
 const SYSTEM_PROMPT =
     \\You are naokiman, a concise coding assistant running in a terminal.
@@ -12,6 +13,10 @@ const SYSTEM_PROMPT =
     \\You have file/shell tools available. Use them when the answer requires
     \\inspecting the local filesystem or running a command. Otherwise just
     \\answer directly. Keep replies short.
+    \\
+    \\Note: write_file, edit_file, and bash require the user's confirmation
+    \\before each call. If the user denies a call, accept the denial and
+    \\suggest a different approach rather than retrying.
 ;
 
 const MAX_TURNS: usize = 20;
@@ -21,6 +26,7 @@ const CliOptions = struct {
     model_override: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
     show_help: bool = false,
+    auto_approve: bool = false,
 };
 
 const USAGE =
@@ -29,6 +35,9 @@ const USAGE =
     \\options:
     \\  --provider <name>   deepseek (default), kimi, qwen
     \\  --model <id>        override the provider's default model
+    \\  -y, --yes           auto-approve all destructive tool calls (bash,
+    \\                      write_file, edit_file). Use only in trusted
+    \\                      automated contexts.
     \\  -h, --help          show this help
     \\
     \\modes:
@@ -77,10 +86,19 @@ pub fn main() !void {
     const tools_json = try tools.renderToolsJson(allocator);
     defer allocator.free(tools_json);
 
+    var stdin_buf: [16 * 1024]u8 = undefined;
+    var stdin_file = std.fs.File.stdin();
+    var stdin_reader = stdin_file.reader(&stdin_buf);
+    const sr = &stdin_reader.interface;
+
+    const interactive = stdin_file.isTty();
+    var policy = perm.Policy.init(allocator, opts.auto_approve, interactive);
+    defer policy.deinit();
+
     if (opts.prompt) |p| {
-        try runOneShot(allocator, client, tools_json, p);
+        try runOneShot(allocator, client, tools_json, &policy, sr, p);
     } else {
-        try runRepl(allocator, client, tools_json);
+        try runRepl(allocator, client, tools_json, &policy, sr);
     }
 }
 
@@ -91,6 +109,8 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
         const a = args[i];
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             opts.show_help = true;
+        } else if (std.mem.eql(u8, a, "-y") or std.mem.eql(u8, a, "--yes")) {
+            opts.auto_approve = true;
         } else if (std.mem.eql(u8, a, "--provider")) {
             i += 1;
             if (i >= args.len) return error.MissingProviderArg;
@@ -113,6 +133,8 @@ fn runOneShot(
     allocator: std.mem.Allocator,
     client: chat.Client,
     tools_json: []const u8,
+    policy: *perm.Policy,
+    stdin_reader: *std.Io.Reader,
     prompt: []const u8,
 ) !void {
     var history = message.History.init(allocator);
@@ -120,7 +142,7 @@ fn runOneShot(
     try history.appendSystem(SYSTEM_PROMPT);
     try history.appendUser(prompt);
 
-    const reply = try driveAgent(allocator, client, tools_json, &history);
+    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, &history);
     try writeStdout(reply);
     try writeStdout("\n");
 }
@@ -129,6 +151,8 @@ fn runRepl(
     allocator: std.mem.Allocator,
     client: chat.Client,
     tools_json: []const u8,
+    policy: *perm.Policy,
+    stdin_reader: *std.Io.Reader,
 ) !void {
     var history = message.History.init(allocator);
     defer history.deinit();
@@ -141,15 +165,10 @@ fn runRepl(
     try writeStdout("\n");
     try writeStdout("commands: /exit  /clear  /help\n\n");
 
-    var stdin_buf: [16 * 1024]u8 = undefined;
-    var stdin_file = std.fs.File.stdin();
-    var stdin_reader = stdin_file.reader(&stdin_buf);
-    const r = &stdin_reader.interface;
-
     while (true) {
         try writeStdout("you> ");
 
-        const maybe_line = r.takeDelimiter('\n') catch |err| switch (err) {
+        const maybe_line = stdin_reader.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => {
                 try writeStdout("(input too long; turn skipped)\n");
                 continue;
@@ -181,7 +200,7 @@ fn runRepl(
 
         try history.appendUser(line);
 
-        const reply = driveAgent(allocator, client, tools_json, &history) catch |err| {
+        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, &history) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             continue;
         };
@@ -200,6 +219,8 @@ fn driveAgent(
     allocator: std.mem.Allocator,
     client: chat.Client,
     tools_json: []const u8,
+    policy: *perm.Policy,
+    stdin_reader: *std.Io.Reader,
     history: *message.History,
 ) ![]const u8 {
     var turn: usize = 0;
@@ -221,6 +242,15 @@ fn driveAgent(
             try writeStdout("(");
             try writeStdout(tc.arguments_json);
             try writeStdout(")\n");
+
+            const approved = try policy.approve(tc.name, tc.arguments_json, stdin_reader, writeStdout);
+            if (!approved) {
+                const denial =
+                    "permission denied by user. The user blocked this tool call. " ++
+                    "Do not retry the same call; suggest an alternative or stop.";
+                try history.appendToolResult(tc.id, denial);
+                continue;
+            }
 
             const result_text = blk: {
                 if (tools.find(tc.name)) |t| {
@@ -247,14 +277,14 @@ fn driveAgent(
     return error.MaxTurnsExceeded;
 }
 
-fn writeStdout(bytes: []const u8) !void {
+fn writeStdout(bytes: []const u8) anyerror!void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writerStreaming(&buf);
     try w.interface.writeAll(bytes);
     try w.interface.flush();
 }
 
-fn writeStderr(bytes: []const u8) !void {
+fn writeStderr(bytes: []const u8) anyerror!void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stderr().writerStreaming(&buf);
     try w.interface.writeAll(bytes);
