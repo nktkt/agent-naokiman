@@ -87,14 +87,13 @@ $ naokiman --provider qwen --model qwen3-coder-flash "Write fizzbuzz in Python."
 $ naokiman --help
 ```
 
-Interactive REPL (multi-turn, history retained, ANSI-styled):
+Interactive REPL (multi-turn, history retained, blue-based ANSI styling):
 
 ```sh
 $ naokiman
-╭─ naokiman  ·  deepseek  ·  deepseek-chat ──╮
-│ /exit /clear /help /save <name> /load <name> /sessions
-│ multiline: <<< ... <<<
-╰────────────────────────────────────────────╯
+▎ naokiman  ·  deepseek  ·  deepseek-chat
+▎ /exit  /clear  /help  /save <name>  /load <name>  /sessions
+▎ multiline: <<< … <<<
 
 you> My favorite number is 42.
 naokiman> Nice. 42 is a classic.

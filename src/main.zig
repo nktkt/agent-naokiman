@@ -286,7 +286,7 @@ fn runRepl(
 
         try history.appendUser(submitted);
 
-        try writePrompt("naokiman> ", style.bold_green);
+        try writePrompt("naokiman> ", style.bold_blue);
         const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
             try writeStyledLine("error: ", @errorName(err), style.bold_red);
             continue;
@@ -334,8 +334,8 @@ fn driveAgent(
         try history.appendAssistantToolCalls(resp.text, resp.tool_calls);
 
         for (resp.tool_calls) |tc| {
-            try writeStdout(style.open(style.fg_gray));
-            try writeStdout("[tool] ");
+            try writeStdout(style.open(style.fg_cyan));
+            try writeStdout("⟢ ");
             try writeStdout(tc.name);
             try writeStdout("(");
             try writeStdout(tc.arguments_json);
@@ -399,41 +399,51 @@ fn writeStyledLine(prefix: []const u8, text: []const u8, code: []const u8) !void
 }
 
 fn printBanner(client: chat.Client) !void {
-    // Top border
-    try writeStdout(style.open(style.bold_blue));
-    try writeStdout("╭─ ");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.bold));
+    const bar = style.open(style.bold_blue);
+    const accent = style.open(style.bold_cyan);
+    const sub = style.open(style.fg_blue);
+    const subtle = style.open(style.fg_cyan);
+    const reset = style.close();
+
+    // Line 1: title
+    try writeStdout(bar);
+    try writeStdout("▎ ");
+    try writeStdout(reset);
+    try writeStdout(accent);
     try writeStdout("naokiman");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.fg_gray));
+    try writeStdout(reset);
+    try writeStdout(sub);
     try writeStdout("  ·  ");
     try writeStdout(client.kind.label());
     try writeStdout("  ·  ");
     try writeStdout(client.model);
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.bold_blue));
-    try writeStdout(" ──╮\n│ ");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.fg_gray));
-    try writeStdout("/exit /clear /help /save <name> /load <name> /sessions");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.bold_blue));
-    try writeStdout("\n│ ");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.fg_gray));
+    try writeStdout(reset);
+    try writeStdout("\n");
+
+    // Line 2: slash commands
+    try writeStdout(bar);
+    try writeStdout("▎ ");
+    try writeStdout(reset);
+    try writeStdout(subtle);
+    try writeStdout("/exit  /clear  /help  /save <name>  /load <name>  /sessions");
+    try writeStdout(reset);
+    try writeStdout("\n");
+
+    // Line 3: multiline hint
+    try writeStdout(bar);
+    try writeStdout("▎ ");
+    try writeStdout(reset);
+    try writeStdout(subtle);
     try writeStdout("multiline: ");
-    try writeStdout(style.open(style.bold));
+    try writeStdout(accent);
     try writeStdout("<<<");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.fg_gray));
-    try writeStdout(" ... ");
-    try writeStdout(style.open(style.bold));
+    try writeStdout(reset);
+    try writeStdout(subtle);
+    try writeStdout(" … ");
+    try writeStdout(accent);
     try writeStdout("<<<");
-    try writeStdout(style.close());
-    try writeStdout(style.open(style.bold_blue));
-    try writeStdout("\n╰────────────────────────────────────────────────────────╯\n\n");
-    try writeStdout(style.close());
+    try writeStdout(reset);
+    try writeStdout("\n\n");
 }
 
 fn writeStderr(bytes: []const u8) anyerror!void {
