@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype with all core phases (0–7) working — HTTP transport, multi-turn chat, an interactive REPL with multi-line input and saveable sessions, a tool-use loop with seven core tools (`read_file` / `write_file` / `edit_file` / `bash` / `ls` / `glob` / `grep`), provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, per-tool approval prompts with danger detection and a persistent allowlist, and SSE streaming so tokens appear as the model emits them.
+> **Status**: Early prototype with all core phases (0–7) plus the longevity essentials — HTTP transport, multi-turn chat, an interactive REPL with multi-line input and saveable sessions, a tool-use loop with seven core tools (`read_file` / `write_file` / `edit_file` / `bash` / `ls` / `glob` / `grep`), provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, per-tool approval prompts with danger detection and a persistent allowlist, SSE streaming, **per-turn token usage display, automatic context compaction when usage approaches the limit, project-local `AGENT.md` ingestion, and Ctrl+C interrupt during streaming**.
 
 ## Goals
 
@@ -37,6 +37,17 @@ Install into `~/.local/bin` (must be on `PATH`):
 ```sh
 zig build --prefix ~/.local
 naokiman "Hello"
+```
+
+## Project context (`AGENT.md`)
+
+If a file named `AGENT.md` exists in the current working directory, its contents are appended to the system prompt at startup. Use it to capture project-specific conventions, build commands, or off-limits paths so you don't have to retype them every session. A second `AGENT.md` at `~/.config/agent-naokiman/AGENT.md` is also loaded as a global preface (project-local overrides win because it comes last).
+
+```markdown
+# Project rules
+- Run `cargo check` before suggesting code changes.
+- Never touch files under `vendored/`.
+- Tests live in `tests/integration/*.rs`.
 ```
 
 ## Configuration
@@ -157,6 +168,20 @@ Available tools (the LLM picks them automatically):
 | `grep(pattern, root, include)` | Recursive substring search with optional file glob filter |
 
 The model decides when to call tools. Each invocation is logged as `[tool] name(args)` lines; the final natural-language answer is on stdout.
+
+### Token usage and context compaction
+
+After every turn the agent prints a one-line usage summary in dim blue:
+
+```
+[ctx 12453 · in 11890 · out 563]
+```
+
+When `prompt_tokens` exceeds 25 k, the agent automatically summarizes the older turns (everything between the system prompt and the last 4 messages) using a side `chat()` call, then replaces them with a single bullet-list summary. You'll see `[context: compacting older turns…]` once the threshold is crossed; the conversation continues in the now-reclaimed budget.
+
+### Interrupt
+
+Press `Ctrl+C` during a streaming response and the SSE loop unwinds at the next chunk; whatever has streamed so far is kept in history. The flag clears between turns so the next prompt works normally.
 
 ### Permissions
 

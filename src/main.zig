@@ -6,8 +6,13 @@ const provider = @import("provider.zig");
 const tools = @import("tools/mod.zig");
 const perm = @import("perm.zig");
 const style = @import("style.zig");
+const interrupt = @import("interrupt.zig");
 
-const SYSTEM_PROMPT =
+fn installSigintHandler() void {
+    interrupt.install();
+}
+
+const BASE_SYSTEM_PROMPT =
     \\You are naokiman, a concise coding assistant running in a terminal.
     \\Reply in the same language the user uses (Japanese ↔ English).
     \\
@@ -22,6 +27,11 @@ const SYSTEM_PROMPT =
 
 const MAX_TURNS: usize = 20;
 const HEREDOC_DELIM = "<<<";
+const AGENT_FILE = "AGENT.md";
+/// When usage.prompt_tokens exceeds this between turns, trigger compaction.
+const COMPACT_TOKEN_THRESHOLD: u32 = 25_000;
+/// How many of the most recent turns to keep verbatim during compaction.
+const COMPACT_KEEP_TAIL: usize = 4;
 
 const CliOptions = struct {
     provider_kind: provider.Kind = .deepseek,
@@ -120,20 +130,70 @@ pub fn main() !void {
     var history = message.History.init(allocator);
     defer history.deinit();
 
+    const system_prompt = try buildSystemPrompt(allocator);
+    defer allocator.free(system_prompt);
+
     if (opts.resume_session) |name| {
-        loadSession(allocator, &history, name) catch |err| {
+        loadSession(allocator, &history, name, system_prompt) catch |err| {
             std.debug.print("error: cannot resume session '{s}': {s}\n", .{ name, @errorName(err) });
             return err;
         };
     } else {
-        try history.appendSystem(SYSTEM_PROMPT);
+        try history.appendSystem(system_prompt);
     }
+
+    installSigintHandler();
 
     if (opts.prompt) |p| {
         try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p);
     } else {
-        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled, &history);
+        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled, &history, system_prompt);
     }
+}
+
+/// Build the effective system prompt: BASE_SYSTEM_PROMPT plus optional content
+/// from `~/.config/agent-naokiman/AGENT.md` (global) and `./AGENT.md` (project).
+/// Returns owned memory.
+fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, BASE_SYSTEM_PROMPT);
+
+    // Global AGENT.md
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch null;
+    if (home) |h| {
+        defer allocator.free(h);
+        const p = try std.fs.path.join(allocator, &.{ h, ".config", "agent-naokiman", AGENT_FILE });
+        defer allocator.free(p);
+        if (try readSmallFile(allocator, p, 256 * 1024)) |body| {
+            defer allocator.free(body);
+            try out.appendSlice(allocator, "\n\n# Global instructions (~/.config/agent-naokiman/AGENT.md)\n\n");
+            try out.appendSlice(allocator, body);
+        }
+    }
+
+    // Project-local AGENT.md
+    if (try readSmallFile(allocator, AGENT_FILE, 256 * 1024)) |body| {
+        defer allocator.free(body);
+        try out.appendSlice(allocator, "\n\n# Project instructions (./AGENT.md)\n\n");
+        try out.appendSlice(allocator, body);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn readSmallFile(allocator: std.mem.Allocator, path: []const u8, cap: usize) !?[]u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    };
+    defer file.close();
+    const stat = try file.stat();
+    if (stat.size == 0 or stat.size > cap) return null;
+    const body = try allocator.alloc(u8, @intCast(stat.size));
+    errdefer allocator.free(body);
+    _ = try file.readAll(body);
+    return body;
 }
 
 fn parseArgs(args: []const [:0]u8) !CliOptions {
@@ -196,6 +256,7 @@ fn runRepl(
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
     history: *message.History,
+    system_prompt: []const u8,
 ) !void {
     try printBanner(client);
 
@@ -232,7 +293,7 @@ fn runRepl(
         if (std.mem.eql(u8, submitted, "/exit") or std.mem.eql(u8, submitted, "/quit")) return;
         if (std.mem.eql(u8, submitted, "/clear")) {
             history.clear();
-            try history.appendSystem(SYSTEM_PROMPT);
+            try history.appendSystem(system_prompt);
             try writeStdout("(history cleared)\n");
             continue;
         }
@@ -270,7 +331,7 @@ fn runRepl(
                 try writeStdout("(usage: /load <name>)\n");
                 continue;
             }
-            loadSession(allocator, history, name) catch |err| {
+            loadSession(allocator, history, name, system_prompt) catch |err| {
                 std.debug.print("error: load failed: {s}\n", .{@errorName(err)});
                 continue;
             };
@@ -317,16 +378,33 @@ fn driveAgent(
     stream_enabled: bool,
     history: *message.History,
 ) ![]const u8 {
+    interrupt.clear();
     var turn: usize = 0;
     while (turn < MAX_TURNS) : (turn += 1) {
+        if (history.items.items.len > COMPACT_KEEP_TAIL + 2) {
+            // Last reading of usage from prior turn governs compaction; but
+            // before turn 1 we have no usage info. Compaction happens lazily
+            // at the bottom of the loop instead.
+        }
+
         var resp = if (stream_enabled)
             try client.chatStreaming(history, tools_json, writeStdout)
         else
             try client.chat(history, tools_json);
         defer resp.deinit();
 
+        if (resp.interrupted) {
+            try writeStyledLine("[interrupted by Ctrl+C]", "", style.bold_yellow);
+            interrupt.clear();
+            try history.appendAssistantText(resp.text);
+            const last = history.items.items[history.items.items.len - 1];
+            return last.assistant.text;
+        }
+
         if (resp.tool_calls.len == 0) {
             try history.appendAssistantText(resp.text);
+            try printUsageLine(resp.usage);
+            try maybeCompact(allocator, client, history, resp.usage);
             const last = history.items.items[history.items.items.len - 1];
             return last.assistant.text;
         }
@@ -372,9 +450,156 @@ fn driveAgent(
 
             try history.appendToolResult(tc.id, result_text);
         }
+
+        try maybeCompact(allocator, client, history, resp.usage);
     }
 
     return error.MaxTurnsExceeded;
+}
+
+fn printUsageLine(u: chat.Usage) !void {
+    if (u.total_tokens == 0) return;
+    var buf: [128]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "[ctx {d} · in {d} · out {d}]", .{
+        u.total_tokens,
+        u.prompt_tokens,
+        u.completion_tokens,
+    }) catch return;
+    try writeStdout("\n");
+    try writeStdout(style.open(style.fg_blue));
+    try writeStdout(line);
+    try writeStdout(style.close());
+    try writeStdout("\n");
+}
+
+/// Compact the history when prompt_tokens is approaching the model's
+/// context limit. Replaces messages between the system prompt and the last
+/// COMPACT_KEEP_TAIL turns with a single summary message.
+fn maybeCompact(
+    allocator: std.mem.Allocator,
+    client: chat.Client,
+    history: *message.History,
+    usage: chat.Usage,
+) !void {
+    if (usage.prompt_tokens <= COMPACT_TOKEN_THRESHOLD) return;
+    const items = history.items.items;
+    if (items.len <= COMPACT_KEEP_TAIL + 2) return;
+
+    try writeStyledLine("[context: ", "compacting older turns…", style.fg_yellow);
+
+    // Build a summarization request with everything except the system prompt
+    // and the last COMPACT_KEEP_TAIL items, plus a final user instruction.
+    var summary_history = message.History.init(allocator);
+    defer summary_history.deinit();
+    try summary_history.appendSystem(
+        \\You are summarizing an in-progress coding agent conversation so the
+        \\agent can continue in a smaller context. Produce a tight, factual
+        \\summary covering: (1) the user's overall goal, (2) what has been
+        \\tried/discovered so far, (3) decisions made, (4) any pending
+        \\sub-tasks. Be concise. Max 12 short bullet points.
+    );
+
+    const tail_start = items.len - COMPACT_KEEP_TAIL;
+    var transcript: std.ArrayListUnmanaged(u8) = .empty;
+    defer transcript.deinit(allocator);
+    var i: usize = 1; // skip system
+    while (i < tail_start) : (i += 1) {
+        switch (items[i]) {
+            .system => {},
+            .user => |t| try transcript.writer(allocator).print("USER: {s}\n", .{t}),
+            .assistant => |a| {
+                if (a.text.len > 0) try transcript.writer(allocator).print("ASSISTANT: {s}\n", .{a.text});
+                for (a.tool_calls) |tc| {
+                    try transcript.writer(allocator).print("ASSISTANT_CALLED: {s}({s})\n", .{ tc.name, tc.arguments_json });
+                }
+            },
+            .tool => |t| try transcript.writer(allocator).print("TOOL_RESULT: {s}\n", .{t.content}),
+        }
+    }
+    try summary_history.appendUser(transcript.items);
+
+    var summary_resp = client.chat(&summary_history, null) catch |err| {
+        std.debug.print("warning: compaction failed: {s} (skipped)\n", .{@errorName(err)});
+        return;
+    };
+    defer summary_resp.deinit();
+
+    // Save the system prompt and the tail, replace the middle.
+    const sys_msg = items[0];
+    const sys_text = if (sys_msg == .system) sys_msg.system else "";
+
+    // Snapshot tail items to dupes (they live in the arena, will be freed by clear()).
+    var tail_dupes: std.ArrayListUnmanaged(message.Message) = .empty;
+    defer tail_dupes.deinit(allocator);
+    var j: usize = tail_start;
+    while (j < items.len) : (j += 1) {
+        try tail_dupes.append(allocator, items[j]);
+    }
+
+    // Stash the tail's text content via a temp arena allocator we'll free later.
+    var tmp = std.heap.ArenaAllocator.init(allocator);
+    defer tmp.deinit();
+    const ta = tmp.allocator();
+
+    const ToolCallSnap = struct { id: []const u8, name: []const u8, args: []const u8 };
+    const Snap = union(enum) {
+        sys: []const u8,
+        usr: []const u8,
+        ass_text: []const u8,
+        ass_tools: struct { text: []const u8, calls: []ToolCallSnap },
+        tool_res: struct { id: []const u8, content: []const u8 },
+    };
+    var snaps: std.ArrayListUnmanaged(Snap) = .empty;
+    defer snaps.deinit(allocator);
+
+    const sys_dup = try ta.dupe(u8, sys_text);
+    try snaps.append(allocator, .{ .sys = sys_dup });
+
+    const summary_dup = try ta.dupe(u8, summary_resp.text);
+    const wrapped = try std.fmt.allocPrint(ta, "[Summary of earlier conversation]\n{s}", .{summary_dup});
+    try snaps.append(allocator, .{ .usr = wrapped });
+
+    for (tail_dupes.items) |m| {
+        switch (m) {
+            .system => |t| try snaps.append(allocator, .{ .sys = try ta.dupe(u8, t) }),
+            .user => |t| try snaps.append(allocator, .{ .usr = try ta.dupe(u8, t) }),
+            .assistant => |a| {
+                if (a.tool_calls.len == 0) {
+                    try snaps.append(allocator, .{ .ass_text = try ta.dupe(u8, a.text) });
+                } else {
+                    const calls = try ta.alloc(ToolCallSnap, a.tool_calls.len);
+                    for (a.tool_calls, 0..) |tc, k| {
+                        calls[k] = .{
+                            .id = try ta.dupe(u8, tc.id),
+                            .name = try ta.dupe(u8, tc.name),
+                            .args = try ta.dupe(u8, tc.arguments_json),
+                        };
+                    }
+                    try snaps.append(allocator, .{ .ass_tools = .{ .text = try ta.dupe(u8, a.text), .calls = calls } });
+                }
+            },
+            .tool => |t| try snaps.append(allocator, .{ .tool_res = .{
+                .id = try ta.dupe(u8, t.tool_call_id),
+                .content = try ta.dupe(u8, t.content),
+            } }),
+        }
+    }
+
+    history.clear();
+    for (snaps.items) |s| {
+        switch (s) {
+            .sys => |t| try history.appendSystem(t),
+            .usr => |t| try history.appendUser(t),
+            .ass_text => |t| try history.appendAssistantText(t),
+            .ass_tools => |x| {
+                const calls = try allocator.alloc(message.ToolCall, x.calls.len);
+                defer allocator.free(calls);
+                for (x.calls, 0..) |c, k| calls[k] = .{ .id = c.id, .name = c.name, .arguments_json = c.args };
+                try history.appendAssistantToolCalls(x.text, calls);
+            },
+            .tool_res => |t| try history.appendToolResult(t.id, t.content),
+        }
+    }
 }
 
 fn writeStdout(bytes: []const u8) anyerror!void {
@@ -524,7 +749,12 @@ fn saveSession(allocator: std.mem.Allocator, history: *const message.History, na
     try file.writeAll(out.writer.buffered());
 }
 
-fn loadSession(allocator: std.mem.Allocator, history: *message.History, name: []const u8) !void {
+fn loadSession(
+    allocator: std.mem.Allocator,
+    history: *message.History,
+    name: []const u8,
+    fallback_system: []const u8,
+) !void {
     const path = try sessionPath(allocator, name);
     defer allocator.free(path);
 
@@ -540,10 +770,7 @@ fn loadSession(allocator: std.mem.Allocator, history: *message.History, name: []
 
     try message.loadHistoryJson(history, body, allocator);
     if (history.items.items.len == 0 or history.items.items[0] != .system) {
-        // Ensure a system prompt is at the front for sane behavior.
-        const items_copy = history.items.items;
-        _ = items_copy;
-        try history.appendSystem(SYSTEM_PROMPT);
+        try history.appendSystem(fallback_system);
     }
 }
 

@@ -2,6 +2,13 @@ const std = @import("std");
 const http = @import("transport/http.zig");
 const message = @import("message.zig");
 const provider = @import("provider.zig");
+const interrupt = @import("interrupt.zig");
+
+pub const Usage = struct {
+    prompt_tokens: u32 = 0,
+    completion_tokens: u32 = 0,
+    total_tokens: u32 = 0,
+};
 
 pub const FinishReason = enum {
     stop,
@@ -23,6 +30,8 @@ pub const ChatResponse = struct {
     finish_reason: FinishReason,
     text: []u8,
     tool_calls: []message.ToolCall,
+    usage: Usage = .{},
+    interrupted: bool = false,
 
     pub fn deinit(self: *ChatResponse) void {
         self.allocator.free(self.text);
@@ -129,6 +138,7 @@ pub const Client = struct {
             .stream = true,
             .tools_raw_json = tools_raw_json,
             .parallel_tool_calls = parallel_tools,
+            .include_usage = true,
         });
 
         const uri = try std.Uri.parse(url);
@@ -197,8 +207,14 @@ fn parseSseStream(
     }
 
     var finish: FinishReason = .other;
+    var usage: Usage = .{};
+    var was_interrupted = false;
 
     sse_loop: while (true) {
+        if (interrupt.requested()) {
+            was_interrupted = true;
+            break :sse_loop;
+        }
         const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => return error.StreamTooLong,
             else => return err,
@@ -217,6 +233,13 @@ fn parseSseStream(
 
         const root = parsed.value;
         if (root != .object) continue;
+
+        // Final chunk for stream_options.include_usage carries usage and an
+        // empty choices array on most providers.
+        if (root.object.get("usage")) |u| {
+            if (u == .object) usage = parseUsage(u);
+        }
+
         const choices = root.object.get("choices") orelse continue;
         if (choices != .array or choices.array.items.len == 0) continue;
         const first = choices.array.items[0];
@@ -301,6 +324,8 @@ fn parseSseStream(
     if (finish == .other) finish = .stop;
 
     return .{
+        .usage = usage,
+        .interrupted = was_interrupted,
         .allocator = allocator,
         .finish_reason = finish,
         .text = text_owned,
@@ -361,10 +386,30 @@ fn parseChatResponse(allocator: std.mem.Allocator, body: []const u8) !ChatRespon
         }
     }
 
+    var usage: Usage = .{};
+    if (root.object.get("usage")) |u| {
+        if (u == .object) usage = parseUsage(u);
+    }
+
     return .{
         .allocator = allocator,
         .finish_reason = FinishReason.fromString(finish_str),
         .text = text,
         .tool_calls = try tool_calls.toOwnedSlice(allocator),
+        .usage = usage,
     };
+}
+
+fn parseUsage(v: std.json.Value) Usage {
+    var u: Usage = .{};
+    if (v.object.get("prompt_tokens")) |x| {
+        if (x == .integer) u.prompt_tokens = @intCast(x.integer);
+    }
+    if (v.object.get("completion_tokens")) |x| {
+        if (x == .integer) u.completion_tokens = @intCast(x.integer);
+    }
+    if (v.object.get("total_tokens")) |x| {
+        if (x == .integer) u.total_tokens = @intCast(x.integer);
+    }
+    return u;
 }

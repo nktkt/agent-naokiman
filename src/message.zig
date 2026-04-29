@@ -106,6 +106,9 @@ pub const ChatRequestArgs = struct {
     /// Emitted as a top-level boolean when set. Qwen requires this for
     /// reliable multi-tool turns; other providers tolerate it.
     parallel_tool_calls: ?bool = null,
+    /// When true, emits `stream_options: { include_usage: true }` so the
+    /// final SSE chunk carries the usage block. No effect on non-streaming.
+    include_usage: bool = false,
 };
 
 pub fn writeChatRequest(args: ChatRequestArgs) !void {
@@ -135,6 +138,14 @@ pub fn writeChatRequest(args: ChatRequestArgs) !void {
     if (args.parallel_tool_calls) |p| {
         try s.objectField("parallel_tool_calls");
         try s.write(p);
+    }
+
+    if (args.stream and args.include_usage) {
+        try s.objectField("stream_options");
+        try s.beginObject();
+        try s.objectField("include_usage");
+        try s.write(true);
+        try s.endObject();
     }
 
     try s.endObject();
