@@ -74,6 +74,10 @@ const CliOptions = struct {
     /// Paths attached via -f / --file. Each file is read and embedded in the
     /// initial user message inside a tagged block.
     attach_files: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// True when --resume was given with no name; load the most recent session.
+    resume_latest: bool = false,
+    /// True for --diag: skip REPL/one-shot, run a connectivity health check.
+    diag: bool = false,
 };
 
 const USAGE =
@@ -82,7 +86,8 @@ const USAGE =
     \\options:
     \\  --provider <name>   deepseek (default), kimi, qwen
     \\  --model <id>        override the provider's default model
-    \\  --resume <name>     load a saved session before starting
+    \\  --resume [name]     load a saved session before starting (no name = latest)
+    \\  --diag              run a connectivity health check and exit
     \\  -y, --yes           auto-approve all destructive tool calls
     \\  --no-stream         disable SSE streaming
     \\  --no-color          disable ANSI color output (also honors NO_COLOR=1)
@@ -182,7 +187,23 @@ pub fn main() !void {
     const system_prompt = try buildSystemPrompt(allocator);
     defer allocator.free(system_prompt);
 
-    if (opts.resume_session) |name| {
+    if (opts.resume_latest) {
+        if (try findLatestSessionName(allocator)) |name| {
+            defer allocator.free(name);
+            loadSession(allocator, &history, name, system_prompt) catch |err| {
+                std.debug.print("error: cannot resume latest session '{s}': {s}\n", .{ name, @errorName(err) });
+                return err;
+            };
+            try writeStdout(style.open(style.fg_gray));
+            try writeStdout("(resumed latest session: ");
+            try writeStdout(name);
+            try writeStdout(")\n");
+            try writeStdout(style.close());
+        } else {
+            try writeStdout("(no saved sessions to resume)\n");
+            try history.appendSystem(system_prompt);
+        }
+    } else if (opts.resume_session) |name| {
         loadSession(allocator, &history, name, system_prompt) catch |err| {
             std.debug.print("error: cannot resume session '{s}': {s}\n", .{ name, @errorName(err) });
             return err;
@@ -191,39 +212,103 @@ pub fn main() !void {
         try history.appendSystem(system_prompt);
     }
 
+    if (opts.diag) {
+        try runDiag(allocator, &cfg, &mcp_mgr);
+        return;
+    }
+
     installSigintHandler();
 
-    // Compose the initial user prompt with any attached files.
-    const composed_prompt: ?[]u8 = if (opts.prompt) |p| blk: {
-        if (opts.attach_files.items.len == 0) break :blk null;
-        break :blk try composeWithAttachments(allocator, p, opts.attach_files.items);
-    } else null;
-    defer if (composed_prompt) |c| allocator.free(c);
-
-    const effective_prompt: ?[]const u8 = if (composed_prompt) |c|
-        c
-    else
-        opts.prompt;
-
-    if (effective_prompt) |p| {
-        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p, &mcp_mgr);
+    if (opts.prompt) |p| {
+        var composed = try composeWithAttachments(allocator, p, opts.attach_files.items);
+        defer composed.deinit(allocator);
+        if (composed.images.len == 0) {
+            try history.appendUser(composed.text);
+        } else {
+            try history.appendUserMultimodal(composed.text, composed.images);
+        }
+        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, &mcp_mgr);
     } else {
         try runRepl(allocator, &client, tools_json, &policy, sr, stream_enabled, &history, system_prompt, &cfg, &mcp_mgr);
     }
 }
 
-/// Concatenate `prompt` with each attached file's contents in a tagged block
-/// the model can clearly identify.
+const Composed = struct {
+    text: []u8,
+    images: [][]u8,
+
+    fn deinit(self: *Composed, gpa: std.mem.Allocator) void {
+        gpa.free(self.text);
+        for (self.images) |img| gpa.free(img);
+        gpa.free(self.images);
+    }
+};
+
+fn imageMime(path: []const u8) ?[]const u8 {
+    const lower = std.ascii.allocLowerString(std.heap.page_allocator, path) catch return null;
+    defer std.heap.page_allocator.free(lower);
+    if (std.mem.endsWith(u8, lower, ".png")) return "image/png";
+    if (std.mem.endsWith(u8, lower, ".jpg") or std.mem.endsWith(u8, lower, ".jpeg")) return "image/jpeg";
+    if (std.mem.endsWith(u8, lower, ".gif")) return "image/gif";
+    if (std.mem.endsWith(u8, lower, ".webp")) return "image/webp";
+    return null;
+}
+
+/// Concatenate `prompt` with each attached file's contents. Text files are
+/// inlined inside `<file path="…">…</file>` tags; image files (PNG/JPEG/GIF/
+/// WebP) are turned into base64 `data:` URLs and surfaced separately so the
+/// caller can build a multimodal user message.
 fn composeWithAttachments(
     allocator: std.mem.Allocator,
     prompt: []const u8,
     files: []const []const u8,
-) ![]u8 {
+) !Composed {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try out.writer.writeAll(prompt);
-    const max_file_bytes: usize = 256 * 1024;
+
+    var images: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (images.items) |img| allocator.free(img);
+        images.deinit(allocator);
+    }
+
+    const max_text_bytes: usize = 256 * 1024;
+    const max_image_bytes: usize = 8 * 1024 * 1024;
+
     for (files) |path| {
+        if (imageMime(path)) |mime| {
+            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+                try out.writer.print("\n\n<image path=\"{s}\" status=\"error\">{s}</image>", .{ path, @errorName(err) });
+                continue;
+            };
+            defer file.close();
+            const stat = file.stat() catch {
+                try out.writer.print("\n\n<image path=\"{s}\" status=\"error\">stat failed</image>", .{path});
+                continue;
+            };
+            if (stat.size == 0 or stat.size > max_image_bytes) {
+                try out.writer.print("\n\n<image path=\"{s}\" status=\"too-large\" size=\"{d}\"/>", .{ path, stat.size });
+                continue;
+            }
+            const raw = try allocator.alloc(u8, @intCast(stat.size));
+            defer allocator.free(raw);
+            _ = file.readAll(raw) catch {
+                try out.writer.print("\n\n<image path=\"{s}\" status=\"error\">read failed</image>", .{path});
+                continue;
+            };
+
+            const enc = std.base64.standard.Encoder;
+            const b64_len = enc.calcSize(raw.len);
+            const b64 = try allocator.alloc(u8, b64_len);
+            defer allocator.free(b64);
+            _ = enc.encode(b64, raw);
+            const url = try std.fmt.allocPrint(allocator, "data:{s};base64,{s}", .{ mime, b64 });
+            try images.append(allocator, url);
+            try out.writer.print("\n\n<image path=\"{s}\" mime=\"{s}\" size=\"{d}\"/>", .{ path, mime, stat.size });
+            continue;
+        }
+
         const file = std.fs.cwd().openFile(path, .{}) catch |err| {
             try out.writer.print(
                 "\n\n<file path=\"{s}\" status=\"error\">\nfailed to open: {s}\n</file>",
@@ -236,7 +321,7 @@ fn composeWithAttachments(
             try out.writer.print("\n\n<file path=\"{s}\" status=\"error\">stat failed</file>", .{path});
             continue;
         };
-        if (stat.size > max_file_bytes) {
+        if (stat.size > max_text_bytes) {
             try out.writer.print(
                 "\n\n<file path=\"{s}\" status=\"truncated\" size=\"{d}\">\n",
                 .{ path, stat.size },
@@ -244,7 +329,7 @@ fn composeWithAttachments(
         } else {
             try out.writer.print("\n\n<file path=\"{s}\" size=\"{d}\">\n", .{ path, stat.size });
         }
-        const read_len: usize = if (stat.size > max_file_bytes) max_file_bytes else @intCast(stat.size);
+        const read_len: usize = if (stat.size > max_text_bytes) max_text_bytes else @intCast(stat.size);
         const buf = try allocator.alloc(u8, read_len);
         defer allocator.free(buf);
         _ = file.readAll(buf) catch {
@@ -255,7 +340,11 @@ fn composeWithAttachments(
         if (read_len > 0 and buf[read_len - 1] != '\n') try out.writer.writeAll("\n");
         try out.writer.writeAll("</file>");
     }
-    return out.toOwnedSlice();
+
+    return .{
+        .text = try out.toOwnedSlice(),
+        .images = try images.toOwnedSlice(allocator),
+    };
 }
 
 fn resolveConfigDir(allocator: std.mem.Allocator) !?[]u8 {
@@ -349,9 +438,16 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             if (i >= args.len) return error.MissingModelArg;
             opts.model_override = args[i];
         } else if (std.mem.eql(u8, a, "--resume")) {
-            i += 1;
-            if (i >= args.len) return error.MissingResumeArg;
-            opts.resume_session = args[i];
+            // Optional argument: if the next arg is missing or starts with '-',
+            // load the most recently saved session instead.
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                i += 1;
+                opts.resume_session = args[i];
+            } else {
+                opts.resume_latest = true;
+            }
+        } else if (std.mem.eql(u8, a, "--diag")) {
+            opts.diag = true;
         } else if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--file")) {
             i += 1;
             if (i >= args.len) return error.MissingFileArg;
@@ -374,11 +470,8 @@ fn runOneShot(
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
     history: *message.History,
-    prompt: []const u8,
     mcp_mgr: *mcp.Manager,
 ) !void {
-    try history.appendUser(prompt);
-
     const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history, mcp_mgr);
     if (!stream_enabled) try writeStdout(reply);
     try writeStdout("\n");
@@ -442,6 +535,7 @@ fn runRepl(
             try writeStdout("/save <name>      save the current session\n");
             try writeStdout("/load <name>      replace history with a saved session\n");
             try writeStdout("/sessions         list saved sessions\n");
+            try writeStdout("/export <path>    export the current session as Markdown\n");
             try writeStdout("/model <id>       switch model for the current provider\n");
             try writeStdout("/provider <name>  switch provider (deepseek / kimi / qwen)\n");
             continue;
@@ -515,6 +609,21 @@ fn runRepl(
             };
             try writeStdout("(loaded '");
             try writeStdout(name);
+            try writeStdout("')\n");
+            continue;
+        }
+        if (std.mem.startsWith(u8, submitted, "/export ")) {
+            const path = std.mem.trim(u8, submitted["/export ".len..], " \t");
+            if (path.len == 0) {
+                try writeStdout("(usage: /export <path.md>)\n");
+                continue;
+            }
+            exportSessionMarkdown(allocator, history, path) catch |err| {
+                std.debug.print("error: export failed: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            try writeStdout("(exported to '");
+            try writeStdout(path);
             try writeStdout("')\n");
             continue;
         }
@@ -737,7 +846,7 @@ fn maybeCompact(
     while (i < tail_start) : (i += 1) {
         switch (items[i]) {
             .system => {},
-            .user => |t| try transcript.writer(allocator).print("USER: {s}\n", .{t}),
+            .user => |u| try transcript.writer(allocator).print("USER: {s}\n", .{u.text}),
             .assistant => |a| {
                 if (a.text.len > 0) try transcript.writer(allocator).print("ASSISTANT: {s}\n", .{a.text});
                 for (a.tool_calls) |tc| {
@@ -793,7 +902,7 @@ fn maybeCompact(
     for (tail_dupes.items) |m| {
         switch (m) {
             .system => |t| try snaps.append(allocator, .{ .sys = try ta.dupe(u8, t) }),
-            .user => |t| try snaps.append(allocator, .{ .usr = try ta.dupe(u8, t) }),
+            .user => |u| try snaps.append(allocator, .{ .usr = try ta.dupe(u8, u.text) }),
             .assistant => |a| {
                 if (a.tool_calls.len == 0) {
                     try snaps.append(allocator, .{ .ass_text = try ta.dupe(u8, a.text) });
@@ -1023,6 +1132,172 @@ fn loadSession(
     try message.loadHistoryJson(history, body, allocator);
     if (history.items.items.len == 0 or history.items.items[0] != .system) {
         try history.appendSystem(fallback_system);
+    }
+}
+
+fn exportSessionMarkdown(
+    allocator: std.mem.Allocator,
+    history: *const message.History,
+    path: []const u8,
+) !void {
+    var resolved: ?[]u8 = null;
+    defer if (resolved) |r| allocator.free(r);
+    const final_path: []const u8 = if (std.mem.endsWith(u8, path, ".md"))
+        path
+    else blk: {
+        resolved = try std.fmt.allocPrint(allocator, "{s}.md", .{path});
+        break :blk resolved.?;
+    };
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    try out.writer.writeAll("# naokiman session\n\n");
+    for (history.items.items) |m| {
+        switch (m) {
+            .system => |t| {
+                try out.writer.writeAll("## System prompt\n\n");
+                try out.writer.writeAll(t);
+                try out.writer.writeAll("\n\n");
+            },
+            .user => |u| {
+                try out.writer.writeAll("## You\n\n");
+                try out.writer.writeAll(u.text);
+                if (u.images.len > 0) {
+                    try out.writer.print("\n\n_(attached {d} image(s))_", .{u.images.len});
+                }
+                try out.writer.writeAll("\n\n");
+            },
+            .assistant => |a| {
+                try out.writer.writeAll("## naokiman\n\n");
+                if (a.text.len > 0) {
+                    try out.writer.writeAll(a.text);
+                    try out.writer.writeAll("\n\n");
+                }
+                if (a.tool_calls.len > 0) {
+                    for (a.tool_calls) |tc| {
+                        try out.writer.print("> tool call: `{s}({s})`\n\n", .{ tc.name, tc.arguments_json });
+                    }
+                }
+            },
+            .tool => |t| {
+                try out.writer.writeAll("## Tool result\n\n```\n");
+                try out.writer.writeAll(t.content);
+                try out.writer.writeAll("\n```\n\n");
+            },
+        }
+    }
+
+    if (std.fs.path.dirname(final_path)) |dir| {
+        if (dir.len > 0) std.fs.cwd().makePath(dir) catch {};
+    }
+    const file = try std.fs.cwd().createFile(final_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(out.writer.buffered());
+}
+
+fn findLatestSessionName(allocator: std.mem.Allocator) !?[]u8 {
+    const dir_path = try sessionsDir(allocator);
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer dir.close();
+
+    var best_name: ?[]u8 = null;
+    errdefer if (best_name) |n| allocator.free(n);
+    var best_mtime: i128 = std.math.minInt(i128);
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const stat = dir.statFile(entry.name) catch continue;
+        if (stat.mtime > best_mtime) {
+            if (best_name) |old| allocator.free(old);
+            best_mtime = stat.mtime;
+            const stem = entry.name[0 .. entry.name.len - ".json".len];
+            best_name = try allocator.dupe(u8, stem);
+        }
+    }
+    return best_name;
+}
+
+fn runDiag(allocator: std.mem.Allocator, cfg: *config.Config, mcp_mgr: *const mcp.Manager) !void {
+    const kinds = [_]provider.Kind{ .deepseek, .kimi, .qwen };
+    try writeStdout(style.open(style.bold));
+    try writeStdout("agent-naokiman diagnostics\n");
+    try writeStdout(style.close());
+    try writeStdout("\n");
+
+    for (kinds) |kind| {
+        try writeStdout("provider ");
+        try writeStdout(kind.label());
+        try writeStdout(": ");
+        const sel = provider.select(cfg, kind, null) catch |err| switch (err) {
+            error.MissingApiKey => {
+                try writeStdout(style.open(style.fg_yellow));
+                try writeStdout("✗ ");
+                try writeStdout(provider.missingKeyEnvName(kind));
+                try writeStdout(" not set");
+                try writeStdout(style.close());
+                try writeStdout("\n");
+                continue;
+            },
+        };
+        try diagOneProvider(allocator, sel);
+        try writeStdout("\n");
+    }
+
+    try writeStdout("\nmcp servers: ");
+    if (mcp_mgr.servers.items.len == 0) {
+        try writeStdout(style.open(style.fg_gray));
+        try writeStdout("(none configured)\n");
+        try writeStdout(style.close());
+    } else {
+        try writeStdout("\n");
+        for (mcp_mgr.servers.items) |srv| {
+            try writeStdout("  ");
+            try writeStdout(style.open(style.fg_green));
+            try writeStdout("✓ ");
+            try writeStdout(srv.name);
+            try writeStdout(style.close());
+            try writeStdout(style.open(style.fg_gray));
+            var buf: [64]u8 = undefined;
+            const tools_label = std.fmt.bufPrint(&buf, " ({d} tools)", .{srv.tool_defs.items.len}) catch " (?)";
+            try writeStdout(tools_label);
+            try writeStdout(style.close());
+            try writeStdout("\n");
+        }
+    }
+}
+
+fn diagOneProvider(allocator: std.mem.Allocator, sel: provider.Selection) !void {
+    const client = chat.Client.fromSelection(allocator, sel);
+    var hist = message.History.init(allocator);
+    defer hist.deinit();
+    try hist.appendSystem("Reply with one short word.");
+    try hist.appendUser("ping");
+    var resp = client.chat(&hist, null) catch |err| {
+        try writeStdout(style.open(style.fg_red));
+        try writeStdout("✗ ");
+        try writeStdout(@errorName(err));
+        try writeStdout(style.close());
+        return;
+    };
+    defer resp.deinit();
+    try writeStdout(style.open(style.fg_green));
+    try writeStdout("✓ ");
+    try writeStdout(client.model);
+    try writeStdout(style.close());
+    if (resp.usage.total_tokens > 0) {
+        try writeStdout(style.open(style.fg_gray));
+        var buf: [64]u8 = undefined;
+        const u = std.fmt.bufPrint(&buf, " ({d} tokens)", .{resp.usage.total_tokens}) catch " (?)";
+        try writeStdout(u);
+        try writeStdout(style.close());
     }
 }
 

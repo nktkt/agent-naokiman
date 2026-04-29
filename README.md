@@ -190,9 +190,13 @@ Attach one or more files to the initial prompt with `-f` / `--file` (repeatable)
 
 ```sh
 $ naokiman -f bug-report.md -f stacktrace.txt "What's likely going wrong?"
+$ naokiman --provider qwen --model qwen3-vl-plus -f screenshot.png "What's wrong with this UI?"
 ```
 
-Each file is read (up to 256 KiB per file) and embedded in the user message inside `<file path="...">…</file>` tags. The model sees the path and contents alongside your prompt — handy for "explain this stack trace" style questions where you'd otherwise need an extra `read_file` round-trip. Image attachments via the multimodal API are not yet implemented; for now `-f` is text-only.
+`-f` handles both text and image files:
+
+- **Text** (anything not recognized as an image): read up to 256 KiB and embedded inside `<file path="…">…</file>` tags so the model sees the path alongside the contents — useful for "explain this stack trace" / "review this diff" questions without an extra `read_file` round-trip.
+- **Images** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`): read up to 8 MiB, base64-encoded, sent as a multimodal `image_url` content part on the user message. Requires a vision-capable model (e.g. Kimi-VL, Qwen-VL); plain `deepseek-chat` rejects vision payloads with HTTP 400.
 
 ### Edit diffs
 
@@ -226,6 +230,26 @@ Define servers in `~/.config/agent-naokiman/mcp.json`:
 On startup, every server is spawned, an `initialize` handshake runs, and `tools/list` populates the catalogue. Tools are exposed to the LLM under the qualified name `mcp__<server>__<tool>`. When the LLM calls one, the request is routed back to the matching server over JSON-RPC stdio. Approval prompts apply only to the built-in destructive tools — MCP tools are passed through (you trust the servers you configured). If a server's child process dies between calls, the agent automatically respawns it once and retries the call before bubbling the failure.
 
 Only the `tools` capability is supported in this build; `resources`, `prompts`, and `sampling` are not yet implemented.
+
+### Diagnostics
+
+`naokiman --diag` exits without entering REPL/one-shot mode and prints a one-line health check per provider plus a summary of any configured MCP servers:
+
+```
+agent-naokiman diagnostics
+
+provider deepseek: ✓ deepseek-chat (13 tokens)
+provider kimi:     ✗ MOONSHOT_API_KEY not set
+provider qwen:     ✗ DASHSCOPE_API_KEY not set
+
+mcp servers: (none configured)
+```
+
+Pings each provider with a 1-token request, so `--diag` does spend a tiny number of tokens on configured providers. Useful before a long session to confirm that all credentials and MCP servers are working.
+
+### Sessions
+
+`/save <name>`, `/load <name>`, `/sessions`, and `/export <path.md>` manage saved transcripts. `--resume <name>` pre-loads a session at startup; `--resume` with no name picks the most recently modified session. `/export` writes the current session as a Markdown transcript suitable for sharing or reviewing.
 
 ### Markdown rendering
 

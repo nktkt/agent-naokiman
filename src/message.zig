@@ -11,9 +11,16 @@ pub const ToolCall = struct {
 
 pub const Message = union(enum) {
     system: []const u8,
-    user: []const u8,
+    user: UserMsg,
     assistant: AssistantMsg,
     tool: ToolMsg,
+
+    pub const UserMsg = struct {
+        text: []const u8,
+        /// Each entry is a data URL (`data:image/png;base64,…`) or external
+        /// http(s) URL. Empty for normal text-only turns.
+        images: []const []const u8 = &.{},
+    };
 
     pub const AssistantMsg = struct {
         /// Optional. May be empty when the assistant turn is a pure tool-call.
@@ -51,7 +58,16 @@ pub const History = struct {
 
     pub fn appendUser(self: *History, text: []const u8) !void {
         const a = self.arena.allocator();
-        try self.items.append(a, .{ .user = try a.dupe(u8, text) });
+        try self.items.append(a, .{ .user = .{ .text = try a.dupe(u8, text) } });
+    }
+
+    /// Like `appendUser` but with attached image data URLs.
+    pub fn appendUserMultimodal(self: *History, text: []const u8, images: []const []const u8) !void {
+        const a = self.arena.allocator();
+        const owned_text = try a.dupe(u8, text);
+        const owned_images = try a.alloc([]const u8, images.len);
+        for (images, 0..) |img, i| owned_images[i] = try a.dupe(u8, img);
+        try self.items.append(a, .{ .user = .{ .text = owned_text, .images = owned_images } });
     }
 
     pub fn appendAssistantText(self: *History, text: []const u8) !void {
@@ -182,7 +198,33 @@ pub fn loadHistoryJson(history: *History, body: []const u8, parent_alloc: std.me
             if (c == .string) try history.appendSystem(c.string);
         } else if (std.mem.eql(u8, role, "user")) {
             const c = item.object.get("content") orelse continue;
-            if (c == .string) try history.appendUser(c.string);
+            if (c == .string) {
+                try history.appendUser(c.string);
+            } else if (c == .array) {
+                var text_buf: std.ArrayList(u8) = .empty;
+                defer text_buf.deinit(parent_alloc);
+                var imgs: std.ArrayList([]const u8) = .empty;
+                defer imgs.deinit(parent_alloc);
+                for (c.array.items) |part| {
+                    if (part != .object) continue;
+                    const t_v = part.object.get("type") orelse continue;
+                    if (t_v != .string) continue;
+                    if (std.mem.eql(u8, t_v.string, "text")) {
+                        if (part.object.get("text")) |tx| {
+                            if (tx == .string) try text_buf.appendSlice(parent_alloc, tx.string);
+                        }
+                    } else if (std.mem.eql(u8, t_v.string, "image_url")) {
+                        if (part.object.get("image_url")) |iv| {
+                            if (iv == .object) {
+                                if (iv.object.get("url")) |u| {
+                                    if (u == .string) try imgs.append(parent_alloc, u.string);
+                                }
+                            }
+                        }
+                    }
+                }
+                try history.appendUserMultimodal(text_buf.items, imgs.items);
+            }
         } else if (std.mem.eql(u8, role, "assistant")) {
             const text: []const u8 = if (item.object.get("content")) |c|
                 if (c == .string) c.string else ""
@@ -235,11 +277,35 @@ fn writeMessage(s: *std.json.Stringify, m: Message) !void {
             try s.objectField("content");
             try s.write(text);
         },
-        .user => |text| {
+        .user => |u| {
             try s.objectField("role");
             try s.write("user");
             try s.objectField("content");
-            try s.write(text);
+            if (u.images.len == 0) {
+                try s.write(u.text);
+            } else {
+                try s.beginArray();
+                if (u.text.len > 0) {
+                    try s.beginObject();
+                    try s.objectField("type");
+                    try s.write("text");
+                    try s.objectField("text");
+                    try s.write(u.text);
+                    try s.endObject();
+                }
+                for (u.images) |img_url| {
+                    try s.beginObject();
+                    try s.objectField("type");
+                    try s.write("image_url");
+                    try s.objectField("image_url");
+                    try s.beginObject();
+                    try s.objectField("url");
+                    try s.write(img_url);
+                    try s.endObject();
+                    try s.endObject();
+                }
+                try s.endArray();
+            }
         },
         .assistant => |a| {
             try s.objectField("role");
