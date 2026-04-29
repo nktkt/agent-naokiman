@@ -1,7 +1,12 @@
 const std = @import("std");
 
 pub const read_file = @import("read_file.zig");
+pub const write_file = @import("write_file.zig");
+pub const edit_file = @import("edit_file.zig");
 pub const bash = @import("bash.zig");
+pub const ls = @import("ls.zig");
+pub const glob = @import("glob.zig");
+pub const grep = @import("grep.zig");
 
 pub const ExecuteFn = *const fn (allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8;
 
@@ -19,7 +24,12 @@ pub const Tool = struct {
 
 pub const all: []const Tool = &.{
     read_file.tool,
+    write_file.tool,
+    edit_file.tool,
     bash.tool,
+    ls.tool,
+    glob.tool,
+    grep.tool,
 };
 
 pub fn find(name: []const u8) ?Tool {

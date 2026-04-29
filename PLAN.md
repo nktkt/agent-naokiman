@@ -99,17 +99,24 @@ agent-naokiman/
 - [x] LLM の `tool_calls` を実行 → `tool` ロールで結果返却 → 終了条件まで反復
 - [x] 停止: `finish_reason == "stop"`、最大ターン数 20
 
-### Phase 3 — コアツール一式（2日）
-- [ ] `write_file`（新規/上書き）
-- [ ] `edit_file`（厳密一致 search/replace）
-- [ ] `grep`, `glob`, `ls`
-- [ ] ツールエラーを LLM 可読な形で返す
+### Phase 3 — コアツール一式（完了）
+- [x] `write_file`（新規/上書き、4 MiB 上限）
+- [x] `edit_file`（厳密一致 search/replace、tmp → rename でアトミック）
+- [x] `grep`（リテラル部分一致 + glob include）, `glob`（`*` `**` `?`）, `ls`
+- [x] ツールエラーを LLM 可読な形で返す（in-band string）
 
-### Phase 4 — マルチプロバイダ（1日）
-- [ ] Provider 抽象化（tagged union 推奨、vtable は後で）
-- [ ] Kimi / Qwen 実装
-- [ ] `--provider kimi --model kimi-k2`
-- [ ] config のデフォルト切替
+### Phase 4 — マルチプロバイダ（次フェーズ）
+- [ ] Provider 抽象化（tagged union）
+- [ ] **Kimi (Moonshot)** 実装
+  - 既定 base URL: `https://api.moonshot.ai/v1`（intl）/ `https://api.moonshot.cn/v1`（CN）
+  - 既定モデル: `kimi-k2.6`（2026-04-20 リリース、256K context）
+  - 注意: `tool_choice="required"` 不可、temperature ∈ [0, 1]、`max_completion_tokens` 推奨
+- [ ] **Qwen (DashScope)** 実装
+  - 既定 base URL: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
+  - 既定モデル: `qwen3-coder-plus`（256K, YaRN で 1M）
+  - 注意: `parallel_tool_calls: true` 必須、stream + tools 不可、tool 結果は string 必須
+- [ ] CLI: `--provider {deepseek|kimi|qwen} --model <id>`
+- [ ] config: 既定プロバイダ切替
 
 ### Phase 5 — ストリーミング（1日）
 - [ ] SSE パーサ

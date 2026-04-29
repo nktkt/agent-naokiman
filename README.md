@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0–2 are working — HTTP transport, multi-turn chat, an interactive REPL against DeepSeek, and a tool-use loop with `read_file` and `bash`. Multi-provider switching and TUI polish are not yet implemented.
+> **Status**: Early prototype. Phases 0–3 are working — HTTP transport, multi-turn chat, an interactive REPL against DeepSeek, and a tool-use loop with seven core tools (`read_file`, `write_file`, `edit_file`, `bash`, `ls`, `glob`, `grep`). Multi-provider switching and TUI polish are not yet implemented.
 
 ## Goals
 
@@ -15,8 +15,8 @@ A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspire
 | Provider | Models | Status |
 |---|---|---|
 | DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | chat + REPL + tool use |
-| Moonshot Kimi | `kimi-k2`, `moonshot-v1-*` | planned |
-| Alibaba Qwen | `qwen3-coder`, `qwen-max` | planned |
+| Moonshot Kimi | `kimi-k2.6`, `moonshot-v1-*` | planned (Phase 4) |
+| Alibaba Qwen | `qwen3-coder-plus`, `qwen3-max` | planned (Phase 4) |
 
 All three speak an OpenAI-compatible API, so they share a single transport layer behind the abstraction.
 
@@ -88,7 +88,7 @@ naokiman> Your favorite number is 42.
 you> /exit
 ```
 
-Tool use (Phase 2):
+Tool use:
 
 ```sh
 $ naokiman "Read README.md and tell me the language. One word."
@@ -98,18 +98,34 @@ Zig
 $ naokiman "Run \`uname -s\` and tell me the OS name only."
 [tool] bash({"command": "uname -s"})
 Darwin
+
+$ naokiman "List files under src/tools/. Just the count."
+[tool] glob({"pattern": "src/tools/**/*.zig"})
+8
 ```
 
-The model decides when to call tools. Each invocation is logged on stderr-style `[tool] ...` lines; the final natural-language answer is on stdout.
+Available tools (the LLM picks them automatically):
 
-> **Warning**: the `bash` tool runs commands with no confirmation prompt. Don't aim it at production systems or destructive commands until permission prompts (Phase 6) are in place.
+| Tool | Purpose |
+|---|---|
+| `read_file(path)` | Read a UTF-8 text file (1 MiB cap) |
+| `write_file(path, content)` | Create or overwrite a file (4 MiB cap, parents auto-created) |
+| `edit_file(path, old_string, new_string)` | Atomic exact-match search/replace (must be unique) |
+| `bash(command)` | Run via `/bin/sh -c` (64 KiB output cap) |
+| `ls(path)` | List immediate directory entries |
+| `glob(pattern, root)` | Walk tree and match `*` / `**` / `?` |
+| `grep(pattern, root, include)` | Recursive substring search with optional file glob filter |
+
+The model decides when to call tools. Each invocation is logged as `[tool] name(args)` lines; the final natural-language answer is on stdout.
+
+> **Warning**: the `bash` and `write_file` tools run with no confirmation prompt. Don't aim them at production systems until permission prompts (Phase 6) are in place.
 
 ## Roadmap
 
 - **Phase 0** — HTTP transport, env/`.env` loader, DeepSeek smoke test ✅
 - **Phase 1** — Multi-turn chat history + interactive REPL ✅
 - **Phase 2** — Tool-use loop with `read_file` and `bash` ✅
-- **Phase 3** — Core tools: `write_file`, `edit_file`, `grep`, `glob`, `ls`
+- **Phase 3** — Core tools: `write_file`, `edit_file`, `ls`, `glob`, `grep` ✅
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
@@ -133,7 +149,12 @@ agent-naokiman/
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig
-    │   └── bash.zig
+    │   ├── write_file.zig  # 4 MiB cap, parents auto-created
+    │   ├── edit_file.zig   # atomic via .tmp + rename, unique-match required
+    │   ├── bash.zig        # /bin/sh -c, 64 KiB output cap
+    │   ├── ls.zig
+    │   ├── glob.zig        # *, **, ? matcher (anchored full-path match)
+    │   └── grep.zig        # recursive substring search with glob include
     └── transport/
         └── http.zig        # std.http.Client wrapper, Bearer auth POST
 ```
