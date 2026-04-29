@@ -184,6 +184,24 @@ When `prompt_tokens` exceeds 25 k, the agent automatically summarizes the older 
 
 Press `Ctrl+C` during a streaming response and the SSE loop unwinds at the next chunk; whatever has streamed so far is kept in history. The flag clears between turns so the next prompt works normally.
 
+### File attachments
+
+Attach one or more files to the initial prompt with `-f` / `--file` (repeatable):
+
+```sh
+$ naokiman -f bug-report.md -f stacktrace.txt "What's likely going wrong?"
+```
+
+Each file is read (up to 256 KiB per file) and embedded in the user message inside `<file path="...">…</file>` tags. The model sees the path and contents alongside your prompt — handy for "explain this stack trace" style questions where you'd otherwise need an extra `read_file` round-trip. Image attachments via the multimodal API are not yet implemented; for now `-f` is text-only.
+
+### Edit diffs
+
+Whenever `edit_file`, `multi_edit`, or `write_file` runs successfully, the agent prints a summary line in dim gray followed by a colored block diff (red `-` for removed lines, green `+` for added lines). The same diff is fed back to the model in the tool result so it can verify the change without re-reading the file.
+
+### Progress indicator
+
+Between sending a request and the first streamed token, naokiman prints a dim `[thinking…]` line. As soon as the first byte arrives (or the request completes for non-streaming mode), the line is cleared and the actual output begins. Suppressed when stdout isn't a TTY.
+
 ### MCP servers
 
 `agent-naokiman` is also an [MCP](https://modelcontextprotocol.io) host: it can spawn external tool servers and expose their tools to the LLM alongside the built-in seven.
@@ -205,7 +223,7 @@ Define servers in `~/.config/agent-naokiman/mcp.json`:
 }
 ```
 
-On startup, every server is spawned, an `initialize` handshake runs, and `tools/list` populates the catalogue. Tools are exposed to the LLM under the qualified name `mcp__<server>__<tool>`. When the LLM calls one, the request is routed back to the matching server over JSON-RPC stdio. Approval prompts apply only to the built-in destructive tools — MCP tools are passed through (you trust the servers you configured). Server crashes are logged but don't kill the agent.
+On startup, every server is spawned, an `initialize` handshake runs, and `tools/list` populates the catalogue. Tools are exposed to the LLM under the qualified name `mcp__<server>__<tool>`. When the LLM calls one, the request is routed back to the matching server over JSON-RPC stdio. Approval prompts apply only to the built-in destructive tools — MCP tools are passed through (you trust the servers you configured). If a server's child process dies between calls, the agent automatically respawns it once and retries the call before bubbling the failure.
 
 Only the `tools` capability is supported in this build; `resources`, `prompts`, and `sampling` are not yet implemented.
 
@@ -300,4 +318,4 @@ agent-naokiman/
 
 ## License
 
-License has not been decided yet. Until a `LICENSE` file is added, the source is provided for reading and review only — no rights to use, modify, or redistribute are granted.
+MIT — see [`LICENSE`](./LICENSE).

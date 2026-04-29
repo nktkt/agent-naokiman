@@ -1,5 +1,6 @@
 const std = @import("std");
 const mod = @import("mod.zig");
+const diff = @import("../diff.zig");
 
 pub const tool: mod.Tool = .{
     .name = "write_file",
@@ -45,6 +46,27 @@ fn execute(allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8 {
         );
     }
 
+    // Capture the previous content (if any) for diff display. Truncate the
+    // capture to MAX_BYTES; that's enough since `content` itself is bounded.
+    var prev: []u8 = &.{};
+    var prev_owned = false;
+    defer if (prev_owned) allocator.free(prev);
+    {
+        if (std.fs.cwd().openFile(path, .{})) |existing| {
+            defer existing.close();
+            const stat = existing.stat() catch null;
+            if (stat) |st| {
+                if (st.size > 0 and st.size <= MAX_BYTES) {
+                    prev = allocator.alloc(u8, @intCast(st.size)) catch &.{};
+                    if (prev.len == @as(usize, @intCast(st.size))) {
+                        prev_owned = true;
+                        _ = existing.readAll(prev) catch {};
+                    }
+                }
+            }
+        } else |_| {}
+    }
+
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             std.fs.cwd().makePath(dir) catch |err| {
@@ -74,5 +96,10 @@ fn execute(allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8 {
         );
     };
 
-    return std.fmt.allocPrint(allocator, "wrote {d} bytes to {s}", .{ content.len, path });
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.print("wrote {d} bytes to {s}", .{ content.len, path });
+    try out.writer.writeAll(diff.DIFF_MARKER);
+    try diff.writeBlockPlain(&out.writer, prev, content);
+    return out.toOwnedSlice();
 }

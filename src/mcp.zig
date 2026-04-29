@@ -31,6 +31,9 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     name: []const u8, // borrowed from arena
+    /// argv used to spawn (and respawn) the server. All slices are owned
+    /// by `arena`, so they survive across config-tree teardown.
+    argv: []const []const u8,
     child: std.process.Child,
     next_id: u64 = 1,
     initialized: bool = false,
@@ -50,6 +53,42 @@ pub const Server = struct {
         self.allocator.free(self.read_buf);
         self.tool_defs.deinit(self.allocator);
         self.arena.deinit();
+    }
+
+    /// (Re)spawn the child process and run the initialize handshake. The
+    /// caller is responsible for calling `fetchTools` after the first spawn
+    /// to populate the catalogue; later respawns assume the catalogue is
+    /// stable.
+    fn spawnChildAndInitialize(self: *Server) !void {
+        if (self.child.stdin) |*s| {
+            s.close();
+            self.child.stdin = null;
+        }
+        // wait() on a freshly-init Child without spawn fails; only call after spawn.
+        if (self.initialized) {
+            _ = self.child.wait() catch {};
+        }
+        self.child = std.process.Child.init(self.argv, self.allocator);
+        self.child.stdin_behavior = .Pipe;
+        self.child.stdout_behavior = .Pipe;
+        self.child.stderr_behavior = .Inherit;
+        self.next_id = 1;
+        self.initialized = false;
+        try self.child.spawn();
+        try self.initialize();
+    }
+
+    fn isRecoverableErr(err: anyerror) bool {
+        return switch (err) {
+            error.BrokenPipe,
+            error.ServerStdinClosed,
+            error.ServerStdoutClosed,
+            error.McpServerExited,
+            error.ConnectionResetByPeer,
+            error.EndOfStream,
+            => true,
+            else => false,
+        };
     }
 
     fn writeJson(self: *Server, json_line: []const u8) !void {
@@ -208,7 +247,23 @@ pub const Server = struct {
     }
 
     /// Invoke a tool by its raw (unqualified) name. Returns owned text.
+    /// On a recoverable transport error (broken pipe etc.), one re-spawn
+    /// + retry is attempted before bubbling the failure.
     pub fn callTool(
+        self: *Server,
+        out_alloc: std.mem.Allocator,
+        raw_name: []const u8,
+        arguments_json: []const u8,
+    ) ![]u8 {
+        return self.callToolOnce(out_alloc, raw_name, arguments_json) catch |err| {
+            if (!isRecoverableErr(err)) return err;
+            std.debug.print("warning: MCP server '{s}' died; respawning...\n", .{self.name});
+            self.spawnChildAndInitialize() catch return err;
+            return self.callToolOnce(out_alloc, raw_name, arguments_json);
+        };
+    }
+
+    fn callToolOnce(
         self: *Server,
         out_alloc: std.mem.Allocator,
         raw_name: []const u8,
@@ -345,17 +400,6 @@ pub const Manager = struct {
         const cmd_v = v.object.get("command") orelse return error.McpConfigMissingCommand;
         if (cmd_v != .string) return error.McpConfigBadCommand;
 
-        var argv: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer argv.deinit(self.allocator);
-        try argv.append(self.allocator, cmd_v.string);
-        if (v.object.get("args")) |args_v| {
-            if (args_v == .array) {
-                for (args_v.array.items) |a| {
-                    if (a == .string) try argv.append(self.allocator, a.string);
-                }
-            }
-        }
-
         const server = try self.allocator.create(Server);
         errdefer self.allocator.destroy(server);
 
@@ -363,7 +407,8 @@ pub const Manager = struct {
             .allocator = self.allocator,
             .arena = std.heap.ArenaAllocator.init(self.allocator),
             .name = "",
-            .child = std.process.Child.init(argv.items, self.allocator),
+            .argv = &.{},
+            .child = undefined,
             .read_buf = try self.allocator.alloc(u8, 256 * 1024),
         };
         errdefer {
@@ -371,16 +416,26 @@ pub const Manager = struct {
             server.arena.deinit();
         }
 
-        // Move server name into arena so it outlives the parsed config.
-        server.name = try server.arena.allocator().dupe(u8, name);
+        const aa = server.arena.allocator();
+        server.name = try aa.dupe(u8, name);
 
-        server.child.stdin_behavior = .Pipe;
-        server.child.stdout_behavior = .Pipe;
-        server.child.stderr_behavior = .Inherit; // surface stderr for debugging
+        // Build argv inside server.arena so it survives past loadConfig().
+        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        try argv_list.append(aa, try aa.dupe(u8, cmd_v.string));
+        if (v.object.get("args")) |args_v| {
+            if (args_v == .array) {
+                for (args_v.array.items) |a| {
+                    if (a == .string) try argv_list.append(aa, try aa.dupe(u8, a.string));
+                }
+            }
+        }
+        server.argv = try argv_list.toOwnedSlice(aa);
 
-        try server.child.spawn();
+        // Construct the Child first so spawnChildAndInitialize can clean it
+        // up consistently (it's a no-op on the .initialized=false path).
+        server.child = std.process.Child.init(server.argv, self.allocator);
 
-        try server.initialize();
+        try server.spawnChildAndInitialize();
         try server.fetchTools();
 
         try self.servers.append(self.allocator, server);

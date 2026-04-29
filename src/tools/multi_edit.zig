@@ -1,5 +1,6 @@
 const std = @import("std");
 const mod = @import("mod.zig");
+const diff = @import("../diff.zig");
 
 pub const tool: mod.Tool = .{
     .name = "multi_edit",
@@ -57,6 +58,8 @@ fn execute(allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8 {
     file.close();
 
     const original_size = buf.items.len;
+    const original_copy = try allocator.dupe(u8, buf.items);
+    defer allocator.free(original_copy);
 
     for (edits_v.array.items, 0..) |edit_v, i| {
         if (edit_v != .object) {
@@ -126,9 +129,13 @@ fn execute(allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8 {
         return std.fmt.allocPrint(allocator, "error: atomic rename failed: {s}", .{@errorName(err)});
     };
 
-    return std.fmt.allocPrint(
-        allocator,
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.print(
         "applied {d} edits to '{s}' ({d} -> {d} bytes)",
         .{ edits_v.array.items.len, path, original_size, buf.items.len },
     );
+    try out.writer.writeAll(diff.DIFF_MARKER);
+    try diff.writeBlockPlain(&out.writer, original_copy, buf.items);
+    return out.toOwnedSlice();
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const mod = @import("mod.zig");
+const diff = @import("../diff.zig");
 
 pub const tool: mod.Tool = .{
     .name = "edit_file",
@@ -129,9 +130,15 @@ fn execute(allocator: std.mem.Allocator, args_json: []const u8) anyerror![]u8 {
     };
 
     const new_size = before.len + new_s.len + after.len;
-    return std.fmt.allocPrint(
-        allocator,
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.print(
         "edited '{s}': replaced 1 occurrence ({d} -> {d} bytes)",
         .{ path, orig.len, new_size },
     );
+    try out.writer.writeAll(diff.DIFF_MARKER);
+    try diff.writeBlockPlain(&out.writer, old_s, new_s);
+    return out.toOwnedSlice();
 }
+

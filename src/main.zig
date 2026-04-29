@@ -9,6 +9,7 @@ const style = @import("style.zig");
 const interrupt = @import("interrupt.zig");
 const render = @import("render.zig");
 const mcp = @import("mcp.zig");
+const diff = @import("diff.zig");
 
 fn installSigintHandler() void {
     interrupt.install();
@@ -18,9 +19,25 @@ fn installSigintHandler() void {
 // the chat.zig callback signature. CLI is single-threaded.
 var g_renderer: render.Renderer = .{};
 var g_render_alloc: std.mem.Allocator = undefined;
+var g_indicator_active: bool = false;
 
 fn streamSink(bytes: []const u8) anyerror!void {
+    if (g_indicator_active) try clearIndicator();
     return g_renderer.write(g_render_alloc, bytes, writeStdout);
+}
+
+fn showIndicator() !void {
+    if (!style.enabled()) return;
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout("[thinking…]");
+    try writeStdout(style.close());
+    g_indicator_active = true;
+}
+
+fn clearIndicator() !void {
+    if (!g_indicator_active) return;
+    try writeStdout("\r\x1b[K");
+    g_indicator_active = false;
 }
 
 const BASE_SYSTEM_PROMPT =
@@ -54,6 +71,9 @@ const CliOptions = struct {
     no_color: bool = false,
     no_md: bool = false,
     resume_session: ?[]const u8 = null,
+    /// Paths attached via -f / --file. Each file is read and embedded in the
+    /// initial user message inside a tagged block.
+    attach_files: std.ArrayListUnmanaged([]const u8) = .empty,
 };
 
 const USAGE =
@@ -67,6 +87,8 @@ const USAGE =
     \\  --no-stream         disable SSE streaming
     \\  --no-color          disable ANSI color output (also honors NO_COLOR=1)
     \\  --no-md             disable markdown-lite rendering of streamed text
+    \\  -f, --file <path>   attach a file's content to the initial prompt
+    \\                      (repeatable; max 256 KiB per file)
     \\  -h, --help          show this help
     \\
     \\modes:
@@ -97,10 +119,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const opts = parseArgs(args) catch |err| {
+    var opts = parseArgs(args) catch |err| {
         try writeStderr(USAGE);
         return err;
     };
+    defer opts.attach_files.deinit(std.heap.page_allocator);
 
     if (opts.show_help) {
         try writeStdout(USAGE);
@@ -170,11 +193,69 @@ pub fn main() !void {
 
     installSigintHandler();
 
-    if (opts.prompt) |p| {
+    // Compose the initial user prompt with any attached files.
+    const composed_prompt: ?[]u8 = if (opts.prompt) |p| blk: {
+        if (opts.attach_files.items.len == 0) break :blk null;
+        break :blk try composeWithAttachments(allocator, p, opts.attach_files.items);
+    } else null;
+    defer if (composed_prompt) |c| allocator.free(c);
+
+    const effective_prompt: ?[]const u8 = if (composed_prompt) |c|
+        c
+    else
+        opts.prompt;
+
+    if (effective_prompt) |p| {
         try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p, &mcp_mgr);
     } else {
         try runRepl(allocator, &client, tools_json, &policy, sr, stream_enabled, &history, system_prompt, &cfg, &mcp_mgr);
     }
+}
+
+/// Concatenate `prompt` with each attached file's contents in a tagged block
+/// the model can clearly identify.
+fn composeWithAttachments(
+    allocator: std.mem.Allocator,
+    prompt: []const u8,
+    files: []const []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.writeAll(prompt);
+    const max_file_bytes: usize = 256 * 1024;
+    for (files) |path| {
+        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+            try out.writer.print(
+                "\n\n<file path=\"{s}\" status=\"error\">\nfailed to open: {s}\n</file>",
+                .{ path, @errorName(err) },
+            );
+            continue;
+        };
+        defer file.close();
+        const stat = file.stat() catch {
+            try out.writer.print("\n\n<file path=\"{s}\" status=\"error\">stat failed</file>", .{path});
+            continue;
+        };
+        if (stat.size > max_file_bytes) {
+            try out.writer.print(
+                "\n\n<file path=\"{s}\" status=\"truncated\" size=\"{d}\">\n",
+                .{ path, stat.size },
+            );
+        } else {
+            try out.writer.print("\n\n<file path=\"{s}\" size=\"{d}\">\n", .{ path, stat.size });
+        }
+        const read_len: usize = if (stat.size > max_file_bytes) max_file_bytes else @intCast(stat.size);
+        const buf = try allocator.alloc(u8, read_len);
+        defer allocator.free(buf);
+        _ = file.readAll(buf) catch {
+            try out.writer.writeAll("(read failed)\n</file>");
+            continue;
+        };
+        try out.writer.writeAll(buf);
+        if (read_len > 0 and buf[read_len - 1] != '\n') try out.writer.writeAll("\n");
+        try out.writer.writeAll("</file>");
+    }
+    return out.toOwnedSlice();
 }
 
 fn resolveConfigDir(allocator: std.mem.Allocator) !?[]u8 {
@@ -271,6 +352,10 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             i += 1;
             if (i >= args.len) return error.MissingResumeArg;
             opts.resume_session = args[i];
+        } else if (std.mem.eql(u8, a, "-f") or std.mem.eql(u8, a, "--file")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFileArg;
+            try opts.attach_files.append(std.heap.page_allocator, args[i]);
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownFlag;
         } else {
@@ -489,10 +574,12 @@ fn driveAgent(
         }
 
         g_renderer.reset(g_render_alloc);
+        try showIndicator();
         var resp = if (stream_enabled)
             try client.chatStreaming(history, tools_json, streamSink)
         else
             try client.chat(history, tools_json);
+        try clearIndicator();
         try g_renderer.flushFinal(g_render_alloc, writeStdout);
         defer resp.deinit();
 
@@ -591,6 +678,7 @@ fn driveAgent(
             };
             defer allocator.free(result_text);
 
+            try renderToolResult(tc.name, result_text);
             try history.appendToolResult(tc.id, result_text);
         }
 
@@ -743,6 +831,27 @@ fn maybeCompact(
             .tool_res => |t| try history.appendToolResult(t.id, t.content),
         }
     }
+}
+
+/// For destructive edit tools, surface the embedded diff to the user with
+/// ANSI coloring. Other tools render only their first line as a dim status.
+fn renderToolResult(tool_name: []const u8, result: []const u8) !void {
+    const is_edit = std.mem.eql(u8, tool_name, "edit_file") or
+        std.mem.eql(u8, tool_name, "multi_edit") or
+        std.mem.eql(u8, tool_name, "write_file");
+    if (!is_edit) return;
+
+    const marker = diff.DIFF_MARKER;
+    const idx = std.mem.indexOf(u8, result, marker) orelse return;
+    const summary = result[0..idx];
+    const diff_body = result[idx + marker.len ..];
+
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout("  ");
+    try writeStdout(summary);
+    try writeStdout(style.close());
+    try writeStdout("\n");
+    try diff.writeDiffStyled(undefined, diff_body, writeStdout);
 }
 
 fn writeStdout(bytes: []const u8) anyerror!void {
