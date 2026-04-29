@@ -1,0 +1,14 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
