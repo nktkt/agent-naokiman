@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phase 0 complete — HTTP transport and a DeepSeek smoke test work end-to-end. The tool-use loop, multi-provider switching, REPL, and TUI are not yet implemented.
+> **Status**: Early prototype. Phases 0 and 1 are working — HTTP transport, multi-turn chat, and an interactive REPL against DeepSeek. The tool-use loop, multi-provider switching, and TUI polish are not yet implemented.
 
 ## Goals
 
@@ -14,7 +14,7 @@ A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspire
 
 | Provider | Models | Status |
 |---|---|---|
-| DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | basic chat working |
+| DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | multi-turn chat + REPL |
 | Moonshot Kimi | `kimi-k2`, `moonshot-v1-*` | planned |
 | Alibaba Qwen | `qwen3-coder`, `qwen-max` | planned |
 
@@ -65,23 +65,35 @@ chmod 600 ~/.config/agent-naokiman/.env
 
 ## Usage
 
-Single-shot prompt (Phase 0):
+One-shot prompt:
 
 ```sh
 $ naokiman "Reply with exactly: pong"
-→ POST https://api.deepseek.com/chat/completions
-→ model: deepseek-chat
-→ user: Reply with exactly: pong
-← status: 200
-← assistant: pong
+pong
 ```
 
-Interactive REPL and tool-use are coming in Phase 1+.
+Interactive REPL (multi-turn, history retained):
+
+```sh
+$ naokiman
+naokiman REPL — model: deepseek-chat
+commands: /exit  /clear  /help
+
+you> My favorite number is 42.
+naokiman> Nice. 42 is a classic.
+
+you> What is my favorite number?
+naokiman> Your favorite number is 42.
+
+you> /exit
+```
+
+Tool-use is coming in Phase 2.
 
 ## Roadmap
 
 - **Phase 0** — HTTP transport, env/`.env` loader, DeepSeek smoke test ✅
-- **Phase 1** — Multi-turn chat history + interactive REPL
+- **Phase 1** — Multi-turn chat history + interactive REPL ✅
 - **Phase 2** — Tool-use loop with `read_file` and `bash`
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `grep`, `glob`, `ls`
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
@@ -100,8 +112,10 @@ agent-naokiman/
 ├── PLAN.md
 ├── README.md
 └── src/
-    ├── main.zig            # CLI entry, request assembly, response parsing
+    ├── main.zig            # CLI entry, one-shot and REPL dispatch
     ├── config.zig          # env + .env loader (global + project)
+    ├── message.zig         # Role / Message / History + JSON request body
+    ├── deepseek.zig        # DeepSeek chat client
     └── transport/
         └── http.zig        # std.http.Client wrapper, Bearer auth POST
 ```

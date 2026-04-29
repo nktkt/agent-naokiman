@@ -80,17 +80,18 @@ agent-naokiman/
 
 ## 5. 開発フェーズ
 
-### Phase 0 — 基盤（1日）
-- [ ] `build.zig` セットアップ（Zig 0.15.2）
-- [ ] `transport/http.zig`: HTTPS POST + JSON
-- [ ] `config.zig`: env 優先、ファイルは後回し
-- [ ] スモークテスト: DeepSeek に1リクエスト通す
+### Phase 0 — 基盤（完了）
+- [x] `build.zig` セットアップ（Zig 0.15.2）
+- [x] `transport/http.zig`: HTTPS POST + JSON
+- [x] `config.zig`: env 優先、`~/.config/agent-naokiman/.env` + `./.env` 対応
+- [x] スモークテスト: DeepSeek に1リクエスト通す
 
-### Phase 1 — 単一プロバイダ チャット（1日）
-- [ ] OpenAI互換メッセージ型（`role`, `content`, `tool_calls`, `tool_call_id`）
-- [ ] DeepSeek プロバイダ実装
-- [ ] `Agent` 構造体: 履歴 `ArrayList(Message)`、`run(input)` で1往復
-- [ ] CLI: `agent-naokiman chat "質問文"`
+### Phase 1 — 単一プロバイダ チャット（完了）
+- [x] OpenAI互換メッセージ型（`role`, `content`）
+- [x] DeepSeek プロバイダ実装
+- [x] `History` 構造体: arena ベース履歴
+- [x] CLI: `naokiman "質問文"` で one-shot、引数なしで REPL
+- [x] REPL コマンド: `/exit`, `/clear`, `/help`
 
 ### Phase 2 — ツール実行ループ（2日）★ MVP の核
 - [ ] `Tool` インターフェース、JSON Schema 定義
