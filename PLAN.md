@@ -93,11 +93,11 @@ agent-naokiman/
 - [x] CLI: `naokiman "質問文"` で one-shot、引数なしで REPL
 - [x] REPL コマンド: `/exit`, `/clear`, `/help`
 
-### Phase 2 — ツール実行ループ（2日）★ MVP の核
-- [ ] `Tool` インターフェース、JSON Schema 定義
-- [ ] `read_file`, `bash` の2ツールを実装
-- [ ] LLM の `tool_calls` を実行 → `tool` ロールで結果返却 → 終了条件まで反復
-- [ ] 停止: `finish_reason == "stop"`、最大ターン数
+### Phase 2 — ツール実行ループ（完了）★ MVP の核
+- [x] `Tool` インターフェース、JSON Schema 定義（`tools/mod.zig`）
+- [x] `read_file`, `bash` の2ツールを実装
+- [x] LLM の `tool_calls` を実行 → `tool` ロールで結果返却 → 終了条件まで反復
+- [x] 停止: `finish_reason == "stop"`、最大ターン数 20
 
 ### Phase 3 — コアツール一式（2日）
 - [ ] `write_file`（新規/上書き）

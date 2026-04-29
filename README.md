@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0 and 1 are working — HTTP transport, multi-turn chat, and an interactive REPL against DeepSeek. The tool-use loop, multi-provider switching, and TUI polish are not yet implemented.
+> **Status**: Early prototype. Phases 0–2 are working — HTTP transport, multi-turn chat, an interactive REPL against DeepSeek, and a tool-use loop with `read_file` and `bash`. Multi-provider switching and TUI polish are not yet implemented.
 
 ## Goals
 
@@ -14,7 +14,7 @@ A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspire
 
 | Provider | Models | Status |
 |---|---|---|
-| DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | multi-turn chat + REPL |
+| DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | chat + REPL + tool use |
 | Moonshot Kimi | `kimi-k2`, `moonshot-v1-*` | planned |
 | Alibaba Qwen | `qwen3-coder`, `qwen-max` | planned |
 
@@ -88,13 +88,27 @@ naokiman> Your favorite number is 42.
 you> /exit
 ```
 
-Tool-use is coming in Phase 2.
+Tool use (Phase 2):
+
+```sh
+$ naokiman "Read README.md and tell me the language. One word."
+[tool] read_file({"path": "README.md"})
+Zig
+
+$ naokiman "Run \`uname -s\` and tell me the OS name only."
+[tool] bash({"command": "uname -s"})
+Darwin
+```
+
+The model decides when to call tools. Each invocation is logged on stderr-style `[tool] ...` lines; the final natural-language answer is on stdout.
+
+> **Warning**: the `bash` tool runs commands with no confirmation prompt. Don't aim it at production systems or destructive commands until permission prompts (Phase 6) are in place.
 
 ## Roadmap
 
 - **Phase 0** — HTTP transport, env/`.env` loader, DeepSeek smoke test ✅
 - **Phase 1** — Multi-turn chat history + interactive REPL ✅
-- **Phase 2** — Tool-use loop with `read_file` and `bash`
+- **Phase 2** — Tool-use loop with `read_file` and `bash` ✅
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `grep`, `glob`, `ls`
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
@@ -112,10 +126,14 @@ agent-naokiman/
 ├── PLAN.md
 ├── README.md
 └── src/
-    ├── main.zig            # CLI entry, one-shot and REPL dispatch
+    ├── main.zig            # CLI entry, one-shot/REPL dispatch, tool-use loop
     ├── config.zig          # env + .env loader (global + project)
-    ├── message.zig         # Role / Message / History + JSON request body
-    ├── deepseek.zig        # DeepSeek chat client
+    ├── message.zig         # Message tagged union + tool_calls serialization
+    ├── deepseek.zig        # DeepSeek chat client (text + tool_calls)
+    ├── tools/
+    │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
+    │   ├── read_file.zig
+    │   └── bash.zig
     └── transport/
         └── http.zig        # std.http.Client wrapper, Bearer auth POST
 ```
