@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("transport/http.zig");
 const message = @import("message.zig");
+const provider = @import("provider.zig");
 
 pub const FinishReason = enum {
     stop,
@@ -35,11 +36,26 @@ pub const ChatResponse = struct {
     }
 };
 
+/// Generic OpenAI-compatible chat client. Used for DeepSeek, Moonshot Kimi
+/// and Alibaba Qwen — they all expose `/chat/completions` with the same
+/// request/response shape, with minor per-provider quirks that are handled
+/// via the `kind` field.
 pub const Client = struct {
     allocator: std.mem.Allocator,
+    kind: provider.Kind,
     api_key: []const u8,
     base_url: []const u8,
     model: []const u8,
+
+    pub fn fromSelection(allocator: std.mem.Allocator, sel: provider.Selection) Client {
+        return .{
+            .allocator = allocator,
+            .kind = sel.kind,
+            .api_key = sel.api_key,
+            .base_url = sel.base_url,
+            .model = sel.model,
+        };
+    }
 
     /// Send the current history (with optional tool definitions) to
     /// /chat/completions. The caller is responsible for evolving the history
@@ -56,15 +72,20 @@ pub const Client = struct {
         );
         defer self.allocator.free(url);
 
+        // Qwen recommends parallel_tool_calls=true; DeepSeek and Kimi
+        // tolerate it. Only emit when tools are present.
+        const parallel_tools: ?bool = if (tools_raw_json != null) true else null;
+
         var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer body_buf.deinit();
-        try message.writeChatRequest(
-            &body_buf.writer,
-            self.model,
-            history,
-            false,
-            tools_raw_json,
-        );
+        try message.writeChatRequest(.{
+            .out = &body_buf.writer,
+            .model = self.model,
+            .history = history,
+            .stream = false,
+            .tools_raw_json = tools_raw_json,
+            .parallel_tool_calls = parallel_tools,
+        });
 
         var resp = try http.postJson(self.allocator, .{
             .url = url,

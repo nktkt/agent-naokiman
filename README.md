@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0–3 are working — HTTP transport, multi-turn chat, an interactive REPL against DeepSeek, and a tool-use loop with seven core tools (`read_file`, `write_file`, `edit_file`, `bash`, `ls`, `glob`, `grep`). Multi-provider switching and TUI polish are not yet implemented.
+> **Status**: Early prototype. Phases 0–4 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools (`read_file`, `write_file`, `edit_file`, `bash`, `ls`, `glob`, `grep`), and provider switching across DeepSeek, Moonshot Kimi, and Alibaba Qwen. Streaming and TUI polish are not yet implemented.
 
 ## Goals
 
@@ -12,13 +12,13 @@ A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspire
 
 ## Supported providers
 
-| Provider | Models | Status |
-|---|---|---|
-| DeepSeek | `deepseek-chat`, `deepseek-v4-flash`, `deepseek-v4-pro` | chat + REPL + tool use |
-| Moonshot Kimi | `kimi-k2.6`, `moonshot-v1-*` | planned (Phase 4) |
-| Alibaba Qwen | `qwen3-coder-plus`, `qwen3-max` | planned (Phase 4) |
+| Provider | CLI flag | Default model | Default base URL |
+|---|---|---|---|
+| DeepSeek | `--provider deepseek` (default) | `deepseek-chat` | `https://api.deepseek.com/v1` |
+| Moonshot Kimi | `--provider kimi` | `kimi-k2.6` | `https://api.moonshot.ai/v1` |
+| Alibaba Qwen | `--provider qwen` | `qwen3-coder-plus` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
 
-All three speak an OpenAI-compatible API, so they share a single transport layer behind the abstraction.
+All three speak an OpenAI-compatible `/chat/completions` API, so they share a single transport layer. Per-provider quirks (e.g. Qwen requiring `parallel_tool_calls: true`) are handled inside the client. Override the default model with `--model <id>` and the base URL via the matching environment variable (`DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `DASHSCOPE_BASE_URL`).
 
 ## Requirements
 
@@ -51,11 +51,18 @@ Example `.env`:
 
 ```sh
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
+# Optional, for --provider kimi
 # MOONSHOT_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# MOONSHOT_BASE_URL=https://api.moonshot.ai/v1
+
+# Optional, for --provider qwen
 # DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 ```
+
+See [`.env.example`](./.env.example) for an annotated template.
 
 Restrict permissions on the global config file:
 
@@ -70,6 +77,14 @@ One-shot prompt:
 ```sh
 $ naokiman "Reply with exactly: pong"
 pong
+```
+
+Pick a different provider or model:
+
+```sh
+$ naokiman --provider kimi "What model are you?"
+$ naokiman --provider qwen --model qwen3-coder-flash "Write fizzbuzz in Python."
+$ naokiman --help
 ```
 
 Interactive REPL (multi-turn, history retained):
@@ -126,6 +141,7 @@ The model decides when to call tools. Each invocation is logged as `[tool] name(
 - **Phase 1** — Multi-turn chat history + interactive REPL ✅
 - **Phase 2** — Tool-use loop with `read_file` and `bash` ✅
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `ls`, `glob`, `grep` ✅
+- **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
@@ -145,7 +161,8 @@ agent-naokiman/
     ├── main.zig            # CLI entry, one-shot/REPL dispatch, tool-use loop
     ├── config.zig          # env + .env loader (global + project)
     ├── message.zig         # Message tagged union + tool_calls serialization
-    ├── deepseek.zig        # DeepSeek chat client (text + tool_calls)
+    ├── chat.zig            # OpenAI-compatible chat client (DeepSeek/Kimi/Qwen)
+    ├── provider.zig        # Provider kind enum + per-provider config selection
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig

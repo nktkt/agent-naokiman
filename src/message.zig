@@ -97,34 +97,44 @@ pub const History = struct {
 /// array string like `[{"type":"function","function":{...}}, ...]` — it is
 /// written verbatim into the body. This avoids re-serializing static schema
 /// definitions on every request.
-pub fn writeChatRequest(
+pub const ChatRequestArgs = struct {
     out: *std.Io.Writer,
     model: []const u8,
     history: *const History,
-    stream: bool,
-    tools_raw_json: ?[]const u8,
-) !void {
-    var s: std.json.Stringify = .{ .writer = out, .options = .{} };
+    stream: bool = false,
+    tools_raw_json: ?[]const u8 = null,
+    /// Emitted as a top-level boolean when set. Qwen requires this for
+    /// reliable multi-tool turns; other providers tolerate it.
+    parallel_tool_calls: ?bool = null,
+};
+
+pub fn writeChatRequest(args: ChatRequestArgs) !void {
+    var s: std.json.Stringify = .{ .writer = args.out, .options = .{} };
     try s.beginObject();
 
     try s.objectField("model");
-    try s.write(model);
+    try s.write(args.model);
 
     try s.objectField("stream");
-    try s.write(stream);
+    try s.write(args.stream);
 
     try s.objectField("messages");
     try s.beginArray();
-    for (history.items.items) |m| {
+    for (args.history.items.items) |m| {
         try writeMessage(&s, m);
     }
     try s.endArray();
 
-    if (tools_raw_json) |tools_json| {
+    if (args.tools_raw_json) |tools_json| {
         try s.objectField("tools");
         try s.beginWriteRaw();
-        try out.writeAll(tools_json);
+        try args.out.writeAll(tools_json);
         s.endWriteRaw();
+    }
+
+    if (args.parallel_tool_calls) |p| {
+        try s.objectField("parallel_tool_calls");
+        try s.write(p);
     }
 
     try s.endObject();

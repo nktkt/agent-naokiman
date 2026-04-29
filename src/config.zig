@@ -5,11 +5,17 @@ pub const APP_NAME = "agent-naokiman";
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     deepseek_api_key: ?[]const u8 = null,
-    deepseek_base_url: []const u8 = "https://api.deepseek.com",
+    deepseek_base_url: []const u8 = "https://api.deepseek.com/v1",
     moonshot_api_key: ?[]const u8 = null,
-    moonshot_base_url: []const u8 = "https://api.moonshot.cn",
+    /// Defaults to the international (.ai) endpoint. Override to
+    /// `https://api.moonshot.cn/v1` for the China site (keys are not
+    /// portable between the two).
+    moonshot_base_url: []const u8 = "https://api.moonshot.ai/v1",
     dashscope_api_key: ?[]const u8 = null,
-    dashscope_base_url: []const u8 = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    /// Defaults to the international (Singapore) endpoint. Override to
+    /// `https://dashscope.aliyuncs.com/compatible-mode/v1` for the
+    /// Beijing endpoint.
+    dashscope_base_url: []const u8 = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();

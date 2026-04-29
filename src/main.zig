@@ -1,61 +1,117 @@
 const std = @import("std");
 const config = @import("config.zig");
 const message = @import("message.zig");
-const deepseek = @import("deepseek.zig");
+const chat = @import("chat.zig");
+const provider = @import("provider.zig");
 const tools = @import("tools/mod.zig");
 
 const SYSTEM_PROMPT =
     \\You are naokiman, a concise coding assistant running in a terminal.
     \\Reply in the same language the user uses (Japanese ↔ English).
     \\
-    \\You have tools available:
-    \\  - read_file(path): read a UTF-8 text file
-    \\  - bash(command): run a shell command via /bin/sh -c
-    \\
-    \\Use them when the answer requires inspecting the local filesystem or
-    \\running a command. Otherwise just answer directly. Keep replies short.
+    \\You have file/shell tools available. Use them when the answer requires
+    \\inspecting the local filesystem or running a command. Otherwise just
+    \\answer directly. Keep replies short.
 ;
 
-const DEFAULT_MODEL = "deepseek-chat";
 const MAX_TURNS: usize = 20;
+
+const CliOptions = struct {
+    provider_kind: provider.Kind = .deepseek,
+    model_override: ?[]const u8 = null,
+    prompt: ?[]const u8 = null,
+    show_help: bool = false,
+};
+
+const USAGE =
+    \\usage: naokiman [options] [prompt]
+    \\
+    \\options:
+    \\  --provider <name>   deepseek (default), kimi, qwen
+    \\  --model <id>        override the provider's default model
+    \\  -h, --help          show this help
+    \\
+    \\modes:
+    \\  no prompt   start an interactive REPL
+    \\  prompt      run a single turn (positional argument)
+    \\
+    \\config:
+    \\  ~/.config/agent-naokiman/.env  (DEEPSEEK_API_KEY / MOONSHOT_API_KEY / DASHSCOPE_API_KEY)
+    \\
+;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    const opts = parseArgs(args) catch |err| {
+        try writeStderr(USAGE);
+        return err;
+    };
+
+    if (opts.show_help) {
+        try writeStdout(USAGE);
+        return;
+    }
+
     var cfg: config.Config = undefined;
     try config.load(&cfg, allocator);
     defer cfg.deinit();
 
-    const api_key = cfg.deepseek_api_key orelse {
-        std.debug.print("error: DEEPSEEK_API_KEY not set (env or .env)\n", .{});
-        return error.MissingApiKey;
+    const sel = provider.select(&cfg, opts.provider_kind, opts.model_override) catch |err| switch (err) {
+        error.MissingApiKey => {
+            std.debug.print(
+                "error: {s} not set (env or .env)\n",
+                .{provider.missingKeyEnvName(opts.provider_kind)},
+            );
+            return error.MissingApiKey;
+        },
     };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const client: deepseek.Client = .{
-        .allocator = allocator,
-        .api_key = api_key,
-        .base_url = cfg.deepseek_base_url,
-        .model = DEFAULT_MODEL,
-    };
+    const client = chat.Client.fromSelection(allocator, sel);
 
     const tools_json = try tools.renderToolsJson(allocator);
     defer allocator.free(tools_json);
 
-    if (args.len >= 2) {
-        try runOneShot(allocator, client, tools_json, args[1]);
+    if (opts.prompt) |p| {
+        try runOneShot(allocator, client, tools_json, p);
     } else {
         try runRepl(allocator, client, tools_json);
     }
 }
 
+fn parseArgs(args: []const [:0]u8) !CliOptions {
+    var opts: CliOptions = .{};
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+            opts.show_help = true;
+        } else if (std.mem.eql(u8, a, "--provider")) {
+            i += 1;
+            if (i >= args.len) return error.MissingProviderArg;
+            opts.provider_kind = provider.Kind.fromString(args[i]) orelse return error.UnknownProvider;
+        } else if (std.mem.eql(u8, a, "--model")) {
+            i += 1;
+            if (i >= args.len) return error.MissingModelArg;
+            opts.model_override = args[i];
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (opts.prompt != null) return error.TooManyPositionalArgs;
+            opts.prompt = a;
+        }
+    }
+    return opts;
+}
+
 fn runOneShot(
     allocator: std.mem.Allocator,
-    client: deepseek.Client,
+    client: chat.Client,
     tools_json: []const u8,
     prompt: []const u8,
 ) !void {
@@ -71,14 +127,16 @@ fn runOneShot(
 
 fn runRepl(
     allocator: std.mem.Allocator,
-    client: deepseek.Client,
+    client: chat.Client,
     tools_json: []const u8,
 ) !void {
     var history = message.History.init(allocator);
     defer history.deinit();
     try history.appendSystem(SYSTEM_PROMPT);
 
-    try writeStdout("naokiman REPL — model: ");
+    try writeStdout("naokiman REPL — provider: ");
+    try writeStdout(client.kind.label());
+    try writeStdout(", model: ");
     try writeStdout(client.model);
     try writeStdout("\n");
     try writeStdout("commands: /exit  /clear  /help\n\n");
@@ -125,7 +183,6 @@ fn runRepl(
 
         const reply = driveAgent(allocator, client, tools_json, &history) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
-            // Keep history intact; the user can retry or /clear.
             continue;
         };
 
@@ -141,7 +198,7 @@ fn runRepl(
 /// (the final assistant text), valid until the history is mutated again.
 fn driveAgent(
     allocator: std.mem.Allocator,
-    client: deepseek.Client,
+    client: chat.Client,
     tools_json: []const u8,
     history: *message.History,
 ) ![]const u8 {
@@ -185,12 +242,6 @@ fn driveAgent(
 
             try history.appendToolResult(tc.id, result_text);
         }
-
-        if (resp.finish_reason != .tool_calls) {
-            // Some providers return finish_reason=stop alongside tool_calls
-            // when no further reply is expected. We still loop once more so
-            // the assistant can summarize the tool result.
-        }
     }
 
     return error.MaxTurnsExceeded;
@@ -199,6 +250,13 @@ fn driveAgent(
 fn writeStdout(bytes: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writerStreaming(&buf);
+    try w.interface.writeAll(bytes);
+    try w.interface.flush();
+}
+
+fn writeStderr(bytes: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stderr().writerStreaming(&buf);
     try w.interface.writeAll(bytes);
     try w.interface.flush();
 }
