@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0–4 + 6 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools, provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, and per-tool approval prompts before destructive operations. Streaming and TUI polish are not yet implemented.
+> **Status**: Early prototype. Phases 0–6 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools, provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, per-tool approval prompts before destructive operations, and SSE streaming so tokens appear as the model emits them. TUI polish, dangerous-command detection, and persistent allowlists are still TODO.
 
 ## Goals
 
@@ -160,6 +160,7 @@ Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 - **Phase 2** — Tool-use loop with `read_file` and `bash` ✅
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `ls`, `glob`, `grep` ✅
 - **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
+- **Phase 5** — SSE streaming (token-by-token output) ✅
 - **Phase 6** — Approval prompts for destructive tools ✅ (allowlist persistence + dangerous-command detection still TODO)
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)

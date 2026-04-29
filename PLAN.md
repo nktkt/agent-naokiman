@@ -118,10 +118,11 @@ agent-naokiman/
 - [ ] CLI: `--provider {deepseek|kimi|qwen} --model <id>`
 - [ ] config: 既定プロバイダ切替
 
-### Phase 5 — ストリーミング（1日）
-- [ ] SSE パーサ
-- [ ] チャンク逐次表示、`tool_calls` の組立て
-- [ ] Ctrl+C で中断
+### Phase 5 — ストリーミング（完了）
+- [x] SSE パーサ（`data: {...}` / `[DONE]` / 空行）
+- [x] テキスト delta は即時 stdout、`tool_calls` は index 単位で id/name/arguments 蓄積
+- [x] `--no-stream` で従来のバッファ動作にフォールバック
+- [ ] Ctrl+C で中断（後続）
 
 ### Phase 6 — 権限とサンドボックス（部分完了）
 - [x] `bash` / `write_file` / `edit_file` 実行前の対話プロンプト

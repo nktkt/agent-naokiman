@@ -27,6 +27,7 @@ const CliOptions = struct {
     prompt: ?[]const u8 = null,
     show_help: bool = false,
     auto_approve: bool = false,
+    no_stream: bool = false,
 };
 
 const USAGE =
@@ -38,6 +39,7 @@ const USAGE =
     \\  -y, --yes           auto-approve all destructive tool calls (bash,
     \\                      write_file, edit_file). Use only in trusted
     \\                      automated contexts.
+    \\  --no-stream         disable SSE streaming, buffer the full response
     \\  -h, --help          show this help
     \\
     \\modes:
@@ -95,10 +97,12 @@ pub fn main() !void {
     var policy = perm.Policy.init(allocator, opts.auto_approve, interactive);
     defer policy.deinit();
 
+    const stream_enabled = !opts.no_stream;
+
     if (opts.prompt) |p| {
-        try runOneShot(allocator, client, tools_json, &policy, sr, p);
+        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, p);
     } else {
-        try runRepl(allocator, client, tools_json, &policy, sr);
+        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled);
     }
 }
 
@@ -111,6 +115,8 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             opts.show_help = true;
         } else if (std.mem.eql(u8, a, "-y") or std.mem.eql(u8, a, "--yes")) {
             opts.auto_approve = true;
+        } else if (std.mem.eql(u8, a, "--no-stream")) {
+            opts.no_stream = true;
         } else if (std.mem.eql(u8, a, "--provider")) {
             i += 1;
             if (i >= args.len) return error.MissingProviderArg;
@@ -135,6 +141,7 @@ fn runOneShot(
     tools_json: []const u8,
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
+    stream_enabled: bool,
     prompt: []const u8,
 ) !void {
     var history = message.History.init(allocator);
@@ -142,8 +149,8 @@ fn runOneShot(
     try history.appendSystem(SYSTEM_PROMPT);
     try history.appendUser(prompt);
 
-    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, &history);
-    try writeStdout(reply);
+    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, &history);
+    if (!stream_enabled) try writeStdout(reply);
     try writeStdout("\n");
 }
 
@@ -153,6 +160,7 @@ fn runRepl(
     tools_json: []const u8,
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
+    stream_enabled: bool,
 ) !void {
     var history = message.History.init(allocator);
     defer history.deinit();
@@ -200,13 +208,13 @@ fn runRepl(
 
         try history.appendUser(line);
 
-        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, &history) catch |err| {
+        try writeStdout("naokiman> ");
+        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, &history) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             continue;
         };
 
-        try writeStdout("naokiman> ");
-        try writeStdout(reply);
+        if (!stream_enabled) try writeStdout(reply);
         try writeStdout("\n\n");
     }
 }
@@ -221,11 +229,15 @@ fn driveAgent(
     tools_json: []const u8,
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
+    stream_enabled: bool,
     history: *message.History,
 ) ![]const u8 {
     var turn: usize = 0;
     while (turn < MAX_TURNS) : (turn += 1) {
-        var resp = try client.chat(history, tools_json);
+        var resp = if (stream_enabled)
+            try client.chatStreaming(history, tools_json, writeStdout)
+        else
+            try client.chat(history, tools_json);
         defer resp.deinit();
 
         if (resp.tool_calls.len == 0) {

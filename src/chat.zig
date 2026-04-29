@@ -36,6 +36,8 @@ pub const ChatResponse = struct {
     }
 };
 
+pub const TextDeltaFn = *const fn (bytes: []const u8) anyerror!void;
+
 /// Generic OpenAI-compatible chat client. Used for DeepSeek, Moonshot Kimi
 /// and Alibaba Qwen — they all expose `/chat/completions` with the same
 /// request/response shape, with minor per-provider quirks that are handled
@@ -57,9 +59,7 @@ pub const Client = struct {
         };
     }
 
-    /// Send the current history (with optional tool definitions) to
-    /// /chat/completions. The caller is responsible for evolving the history
-    /// based on the returned `ChatResponse`.
+    /// Non-streaming `/chat/completions` request. Buffered end-to-end.
     pub fn chat(
         self: Client,
         history: *const message.History,
@@ -72,8 +72,6 @@ pub const Client = struct {
         );
         defer self.allocator.free(url);
 
-        // Qwen recommends parallel_tool_calls=true; DeepSeek and Kimi
-        // tolerate it. Only emit when tools are present.
         const parallel_tools: ?bool = if (tools_raw_json != null) true else null;
 
         var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
@@ -103,7 +101,212 @@ pub const Client = struct {
 
         return parseChatResponse(self.allocator, resp.body);
     }
+
+    /// Streaming `/chat/completions`. Text deltas are dispatched to
+    /// `on_text` immediately as they arrive; tool_calls are accumulated
+    /// silently. Returns the assembled `ChatResponse` at the end.
+    pub fn chatStreaming(
+        self: Client,
+        history: *const message.History,
+        tools_raw_json: ?[]const u8,
+        on_text: ?TextDeltaFn,
+    ) !ChatResponse {
+        const url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/chat/completions",
+            .{self.base_url},
+        );
+        defer self.allocator.free(url);
+
+        const parallel_tools: ?bool = if (tools_raw_json != null) true else null;
+
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_buf.deinit();
+        try message.writeChatRequest(.{
+            .out = &body_buf.writer,
+            .model = self.model,
+            .history = history,
+            .stream = true,
+            .tools_raw_json = tools_raw_json,
+            .parallel_tool_calls = parallel_tools,
+        });
+
+        const uri = try std.Uri.parse(url);
+
+        var client: std.http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        var auth_buf: [256]u8 = undefined;
+        const auth_value = try std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{self.api_key});
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Authorization", .value = auth_value },
+            .{ .name = "Accept", .value = "text/event-stream" },
+        };
+
+        var req = try client.request(.POST, uri, .{
+            .keep_alive = false,
+            .headers = .{ .content_type = .{ .override = "application/json" } },
+            .extra_headers = &headers,
+        });
+        defer req.deinit();
+
+        // sendBodyComplete needs a mutable []u8; the body content is owned by
+        // body_buf and not used after the call.
+        const body_mutable: []u8 = body_buf.written();
+        req.transfer_encoding = .{ .content_length = body_mutable.len };
+        try req.sendBodyComplete(body_mutable);
+
+        var redirect_buf: [8 * 1024]u8 = undefined;
+        var resp = try req.receiveHead(&redirect_buf);
+        const status_code = @intFromEnum(resp.head.status);
+        if (status_code < 200 or status_code >= 300) {
+            std.debug.print("error: streaming status={d}\n", .{status_code});
+            return error.HttpError;
+        }
+
+        var transfer_buf: [16 * 1024]u8 = undefined;
+        const reader = resp.reader(&transfer_buf);
+
+        return parseSseStream(self.allocator, reader, on_text);
+    }
 };
+
+const ToolCallBuilder = struct {
+    id: std.ArrayListUnmanaged(u8) = .empty,
+    name: std.ArrayListUnmanaged(u8) = .empty,
+    args: std.ArrayListUnmanaged(u8) = .empty,
+};
+
+fn parseSseStream(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    on_text: ?TextDeltaFn,
+) !ChatResponse {
+    var text_buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer text_buf.deinit(allocator);
+
+    var builders = std.ArrayListUnmanaged(ToolCallBuilder){};
+    errdefer {
+        for (builders.items) |*b| {
+            b.id.deinit(allocator);
+            b.name.deinit(allocator);
+            b.args.deinit(allocator);
+        }
+        builders.deinit(allocator);
+    }
+
+    var finish: FinishReason = .other;
+
+    sse_loop: while (true) {
+        const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.StreamTooLong,
+            else => return err,
+        };
+        const raw = maybe_line orelse break :sse_loop;
+        const line = std.mem.trimRight(u8, raw, "\r");
+        if (line.len == 0) continue;
+        if (!std.mem.startsWith(u8, line, "data:")) continue;
+
+        var data = line["data:".len..];
+        if (data.len > 0 and data[0] == ' ') data = data[1..];
+        if (std.mem.eql(u8, data, "[DONE]")) break :sse_loop;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch continue;
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .object) continue;
+        const choices = root.object.get("choices") orelse continue;
+        if (choices != .array or choices.array.items.len == 0) continue;
+        const first = choices.array.items[0];
+        if (first != .object) continue;
+
+        if (first.object.get("finish_reason")) |fv| {
+            if (fv == .string) finish = FinishReason.fromString(fv.string);
+        }
+
+        const delta = first.object.get("delta") orelse continue;
+        if (delta != .object) continue;
+
+        if (delta.object.get("content")) |c| {
+            if (c == .string and c.string.len > 0) {
+                try text_buf.appendSlice(allocator, c.string);
+                if (on_text) |cb| try cb(c.string);
+            }
+        }
+
+        if (delta.object.get("tool_calls")) |tcs| {
+            if (tcs != .array) continue;
+            for (tcs.array.items) |tc_v| {
+                if (tc_v != .object) continue;
+                const idx_v = tc_v.object.get("index") orelse continue;
+                const idx: usize = if (idx_v == .integer) @intCast(idx_v.integer) else continue;
+
+                while (builders.items.len <= idx) try builders.append(allocator, .{});
+                var b = &builders.items[idx];
+
+                if (tc_v.object.get("id")) |idv| {
+                    if (idv == .string) try b.id.appendSlice(allocator, idv.string);
+                }
+                if (tc_v.object.get("function")) |fnv| {
+                    if (fnv == .object) {
+                        if (fnv.object.get("name")) |nv| {
+                            if (nv == .string) try b.name.appendSlice(allocator, nv.string);
+                        }
+                        if (fnv.object.get("arguments")) |av| {
+                            if (av == .string) try b.args.appendSlice(allocator, av.string);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const text_owned = try text_buf.toOwnedSlice(allocator);
+    errdefer allocator.free(text_owned);
+
+    var tool_calls_list = std.ArrayList(message.ToolCall){};
+    errdefer {
+        for (tool_calls_list.items) |tc| {
+            allocator.free(tc.id);
+            allocator.free(tc.name);
+            allocator.free(tc.arguments_json);
+        }
+        tool_calls_list.deinit(allocator);
+    }
+
+    for (builders.items) |*b| {
+        if (b.id.items.len == 0 and b.name.items.len == 0) {
+            b.id.deinit(allocator);
+            b.name.deinit(allocator);
+            b.args.deinit(allocator);
+            continue;
+        }
+        const id = try b.id.toOwnedSlice(allocator);
+        const name = try b.name.toOwnedSlice(allocator);
+        const args = if (b.args.items.len > 0)
+            try b.args.toOwnedSlice(allocator)
+        else
+            try allocator.dupe(u8, "{}");
+        try tool_calls_list.append(allocator, .{
+            .id = id,
+            .name = name,
+            .arguments_json = args,
+        });
+    }
+    builders.deinit(allocator);
+
+    if (finish == .other and tool_calls_list.items.len > 0) finish = .tool_calls;
+    if (finish == .other) finish = .stop;
+
+    return .{
+        .allocator = allocator,
+        .finish_reason = finish,
+        .text = text_owned,
+        .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
+    };
+}
 
 fn parseChatResponse(allocator: std.mem.Allocator, body: []const u8) !ChatResponse {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
