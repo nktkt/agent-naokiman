@@ -5,6 +5,7 @@ const chat = @import("chat.zig");
 const provider = @import("provider.zig");
 const tools = @import("tools/mod.zig");
 const perm = @import("perm.zig");
+const style = @import("style.zig");
 
 const SYSTEM_PROMPT =
     \\You are naokiman, a concise coding assistant running in a terminal.
@@ -29,6 +30,7 @@ const CliOptions = struct {
     show_help: bool = false,
     auto_approve: bool = false,
     no_stream: bool = false,
+    no_color: bool = false,
     resume_session: ?[]const u8 = null,
 };
 
@@ -41,6 +43,7 @@ const USAGE =
     \\  --resume <name>     load a saved session before starting
     \\  -y, --yes           auto-approve all destructive tool calls
     \\  --no-stream         disable SSE streaming
+    \\  --no-color          disable ANSI color output (also honors NO_COLOR=1)
     \\  -h, --help          show this help
     \\
     \\modes:
@@ -106,6 +109,9 @@ pub fn main() !void {
     const sr = &stdin_reader.interface;
 
     const interactive = stdin_file.isTty();
+    style.detect(std.fs.File.stdout().isTty());
+    if (opts.no_color) style.force(false);
+
     var policy = perm.Policy.init(allocator, opts.auto_approve, interactive);
     defer policy.deinit();
 
@@ -141,6 +147,8 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             opts.auto_approve = true;
         } else if (std.mem.eql(u8, a, "--no-stream")) {
             opts.no_stream = true;
+        } else if (std.mem.eql(u8, a, "--no-color")) {
+            opts.no_color = true;
         } else if (std.mem.eql(u8, a, "--provider")) {
             i += 1;
             if (i >= args.len) return error.MissingProviderArg;
@@ -189,16 +197,10 @@ fn runRepl(
     stream_enabled: bool,
     history: *message.History,
 ) !void {
-    try writeStdout("naokiman REPL — provider: ");
-    try writeStdout(client.kind.label());
-    try writeStdout(", model: ");
-    try writeStdout(client.model);
-    try writeStdout("\n");
-    try writeStdout("commands: /exit  /clear  /help  /save <name>  /load <name>  /sessions\n");
-    try writeStdout("multiline: type `<<<` on a line by itself, then another `<<<` to submit\n\n");
+    try printBanner(client);
 
     while (true) {
-        try writeStdout("you> ");
+        try writePrompt("you> ", style.bold_cyan);
 
         const first = (try readLine(stdin_reader)) orelse {
             try writeStdout("\n");
@@ -212,7 +214,7 @@ fn runRepl(
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             errdefer buf.deinit(allocator);
             heredoc: while (true) {
-                try writeStdout("... ");
+                try writePrompt("... ", style.dim);
                 const next = (try readLine(stdin_reader)) orelse break :heredoc;
                 const next_trimmed = std.mem.trimRight(u8, next, "\r");
                 if (std.mem.eql(u8, std.mem.trim(u8, next_trimmed, " \t"), HEREDOC_DELIM)) break :heredoc;
@@ -284,9 +286,9 @@ fn runRepl(
 
         try history.appendUser(submitted);
 
-        try writeStdout("naokiman> ");
+        try writePrompt("naokiman> ", style.bold_green);
         const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
-            std.debug.print("error: {s}\n", .{@errorName(err)});
+            try writeStyledLine("error: ", @errorName(err), style.bold_red);
             continue;
         };
 
@@ -332,11 +334,14 @@ fn driveAgent(
         try history.appendAssistantToolCalls(resp.text, resp.tool_calls);
 
         for (resp.tool_calls) |tc| {
+            try writeStdout(style.open(style.fg_gray));
             try writeStdout("[tool] ");
             try writeStdout(tc.name);
             try writeStdout("(");
             try writeStdout(tc.arguments_json);
-            try writeStdout(")\n");
+            try writeStdout(")");
+            try writeStdout(style.close());
+            try writeStdout("\n");
 
             const approved = try policy.approve(tc.name, tc.arguments_json, stdin_reader, writeStdout);
             if (!approved) {
@@ -377,6 +382,58 @@ fn writeStdout(bytes: []const u8) anyerror!void {
     var w = std.fs.File.stdout().writerStreaming(&buf);
     try w.interface.writeAll(bytes);
     try w.interface.flush();
+}
+
+fn writePrompt(text: []const u8, code: []const u8) !void {
+    try writeStdout(style.open(code));
+    try writeStdout(text);
+    try writeStdout(style.close());
+}
+
+fn writeStyledLine(prefix: []const u8, text: []const u8, code: []const u8) !void {
+    try writeStdout(style.open(code));
+    try writeStdout(prefix);
+    try writeStdout(text);
+    try writeStdout(style.close());
+    try writeStdout("\n");
+}
+
+fn printBanner(client: chat.Client) !void {
+    // Top border
+    try writeStdout(style.open(style.bold_blue));
+    try writeStdout("╭─ ");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.bold));
+    try writeStdout("naokiman");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout("  ·  ");
+    try writeStdout(client.kind.label());
+    try writeStdout("  ·  ");
+    try writeStdout(client.model);
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.bold_blue));
+    try writeStdout(" ──╮\n│ ");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout("/exit /clear /help /save <name> /load <name> /sessions");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.bold_blue));
+    try writeStdout("\n│ ");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout("multiline: ");
+    try writeStdout(style.open(style.bold));
+    try writeStdout("<<<");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.fg_gray));
+    try writeStdout(" ... ");
+    try writeStdout(style.open(style.bold));
+    try writeStdout("<<<");
+    try writeStdout(style.close());
+    try writeStdout(style.open(style.bold_blue));
+    try writeStdout("\n╰────────────────────────────────────────────────────────╯\n\n");
+    try writeStdout(style.close());
 }
 
 fn writeStderr(bytes: []const u8) anyerror!void {

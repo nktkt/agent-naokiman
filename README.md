@@ -87,13 +87,14 @@ $ naokiman --provider qwen --model qwen3-coder-flash "Write fizzbuzz in Python."
 $ naokiman --help
 ```
 
-Interactive REPL (multi-turn, history retained):
+Interactive REPL (multi-turn, history retained, ANSI-styled):
 
 ```sh
 $ naokiman
-naokiman REPL — provider: deepseek, model: deepseek-chat
-commands: /exit  /clear  /help  /save <name>  /load <name>  /sessions
-multiline: type `<<<` on a line by itself, then another `<<<` to submit
+╭─ naokiman  ·  deepseek  ·  deepseek-chat ──╮
+│ /exit /clear /help /save <name> /load <name> /sessions
+│ multiline: <<< ... <<<
+╰────────────────────────────────────────────╯
 
 you> My favorite number is 42.
 naokiman> Nice. 42 is a classic.
@@ -182,7 +183,7 @@ Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 - **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
 - **Phase 5** — SSE streaming (token-by-token output) ✅
 - **Phase 6** — Approval prompts + danger detection (`rm -rf /`, `curl|sh`, etc.) + persistent allowlist ✅
-- **Phase 7** — REPL polish: multiline heredoc input, `/save`/`/load`/`/sessions`, `--resume <name>` ✅ (Markdown rendering still TODO)
+- **Phase 7** — REPL polish: multiline heredoc input, `/save`/`/load`/`/sessions`, `--resume <name>`, ANSI-styled banner & prompts ✅ (Markdown rendering still TODO)
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
@@ -205,6 +206,7 @@ agent-naokiman/
     ├── chat.zig            # OpenAI-compatible chat client (DeepSeek/Kimi/Qwen)
     ├── provider.zig        # Provider kind enum + per-provider config selection
     ├── perm.zig            # Approval policy + interactive prompt
+    ├── style.zig           # ANSI helpers, NO_COLOR / --no-color aware
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig

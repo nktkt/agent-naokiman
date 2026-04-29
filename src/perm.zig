@@ -1,4 +1,5 @@
 const std = @import("std");
+const style = @import("style.zig");
 
 const APP_DIR = "agent-naokiman";
 const ALLOWLIST_FILENAME = "allowed.json";
@@ -110,8 +111,10 @@ pub const Policy = struct {
         if (self.allow_exact.contains(exact_key)) return true;
 
         if (!self.interactive) {
+            try writer(style.open(style.fg_yellow));
             try writer("[permission] auto-deny (no TTY) for ");
             try writer(tool_name);
+            try writer(style.close());
             try writer("\n");
             return false;
         }
@@ -143,14 +146,26 @@ pub const Policy = struct {
         writer: *const fn ([]const u8) anyerror!void,
     ) !Decision {
         _ = self;
-        try writer("\n[approval needed] tool: ");
+        try writer("\n");
+        try writer(style.open(style.bold_yellow));
+        try writer("┌─ approval needed: ");
         try writer(tool_name);
-        try writer("\n  args: ");
+        try writer(" ─");
+        try writer(style.close());
+        try writer("\n");
+        try writer(style.open(style.fg_gray));
+        try writer("│ args: ");
+        try writer(style.close());
         try writer(args_json);
         try writer("\n");
         if (dangerReason(tool_name, args_json)) |reason| {
-            try writer("  ⚠ DANGER: ");
+            try writer(style.open(style.danger));
+            try writer(" ⚠ DANGER ");
+            try writer(style.close());
+            try writer(" ");
+            try writer(style.open(style.bold_red));
             try writer(reason);
+            try writer(style.close());
             try writer("\n");
         }
         try writer("  1) yes, just this once\n");
@@ -159,7 +174,9 @@ pub const Policy = struct {
         try writer(tool_name);
         try writer(" calls for the session\n");
         try writer("  4) no, deny\n");
+        try writer(style.open(style.bold_cyan));
         try writer("choice [1-4, default 4]: ");
+        try writer(style.close());
 
         const maybe = reader.takeDelimiter('\n') catch |err| switch (err) {
             error.StreamTooLong => return .deny,
