@@ -124,12 +124,12 @@ agent-naokiman/
 - [x] `--no-stream` で従来のバッファ動作にフォールバック
 - [ ] Ctrl+C で中断（後続）
 
-### Phase 6 — 権限とサンドボックス（部分完了）
+### Phase 6 — 権限とサンドボックス（完了）
 - [x] `bash` / `write_file` / `edit_file` 実行前の対話プロンプト
 - [x] セッション内 allowlist（exact-match と tool 単位 blanket）
 - [x] `--yes` で自動承認、非 TTY 時は自動 deny
-- [ ] 危険コマンド検出（`rm -rf`, `curl|sh` 等）— 後続
-- [ ] allowlist の永続化（`~/.config/agent-naokiman/allowed.json`）— 後続
+- [x] 危険コマンド検出（`rm -rf /`, `curl\|sh`, `dd if=`, `mkfs`, `chmod -R 777`, fork bomb, sudo, force-push 等）→ プロンプトに `⚠ DANGER:` 付与
+- [x] allowlist の永続化（`~/.config/agent-naokiman/allowed.json`、option 2 を選んだ exact pair が次回起動時に自動承認）
 
 ### Phase 7 — TUI/REPL 改善（任意、数日）
 - [ ] マルチライン入力

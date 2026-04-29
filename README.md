@@ -153,6 +153,10 @@ When stdin is not a TTY (piped input, CI), all destructive calls are denied auto
 
 Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 
+**Danger detection.** `bash` commands matching well-known destructive patterns get a `⚠ DANGER:` line in the prompt — `rm -rf /`, `rm -rf ~`, `curl … | sh`, `wget … | bash`, `dd if=`, `mkfs`, `chmod -R 777`, sudo, fork bombs, force-push, and `git reset --hard` are flagged. The detection is informational; the user still chooses to allow or deny.
+
+**Persistent allowlist.** Option `2` in the prompt (yes, remember this exact command) writes the `(tool, args)` pair to `~/.config/agent-naokiman/allowed.json` (mode 0600). On the next run, that exact call is auto-approved without a prompt. Blanket per-tool grants (option `3`) are session-only and never persisted. Delete the file to forget all approvals.
+
 ## Roadmap
 
 - **Phase 0** — HTTP transport, env/`.env` loader, DeepSeek smoke test ✅
@@ -161,7 +165,7 @@ Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 - **Phase 3** — Core tools: `write_file`, `edit_file`, `ls`, `glob`, `grep` ✅
 - **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
 - **Phase 5** — SSE streaming (token-by-token output) ✅
-- **Phase 6** — Approval prompts for destructive tools ✅ (allowlist persistence + dangerous-command detection still TODO)
+- **Phase 6** — Approval prompts + danger detection (`rm -rf /`, `curl|sh`, etc.) + persistent allowlist ✅
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
