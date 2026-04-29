@@ -140,6 +140,81 @@ pub fn writeChatRequest(args: ChatRequestArgs) !void {
     try s.endObject();
 }
 
+/// Serialize just the messages array (no model/tools wrapper) to `out`.
+/// Round-trips with `loadHistoryJson`.
+pub fn writeHistoryJson(out: *std.Io.Writer, history: *const History) !void {
+    var s: std.json.Stringify = .{ .writer = out, .options = .{} };
+    try s.beginArray();
+    for (history.items.items) |m| {
+        try writeMessage(&s, m);
+    }
+    try s.endArray();
+}
+
+/// Replace `history.items` with messages parsed from a JSON array produced
+/// by `writeHistoryJson`. Existing items are dropped.
+pub fn loadHistoryJson(history: *History, body: []const u8, parent_alloc: std.mem.Allocator) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, parent_alloc, body, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidFormat;
+
+    history.clear();
+
+    for (parsed.value.array.items) |item| {
+        if (item != .object) continue;
+        const role_v = item.object.get("role") orelse continue;
+        if (role_v != .string) continue;
+        const role = role_v.string;
+
+        if (std.mem.eql(u8, role, "system")) {
+            const c = item.object.get("content") orelse continue;
+            if (c == .string) try history.appendSystem(c.string);
+        } else if (std.mem.eql(u8, role, "user")) {
+            const c = item.object.get("content") orelse continue;
+            if (c == .string) try history.appendUser(c.string);
+        } else if (std.mem.eql(u8, role, "assistant")) {
+            const text: []const u8 = if (item.object.get("content")) |c|
+                if (c == .string) c.string else ""
+            else
+                "";
+
+            var tcs_buf = std.ArrayList(ToolCall){};
+            defer tcs_buf.deinit(parent_alloc);
+
+            if (item.object.get("tool_calls")) |tcs| {
+                if (tcs == .array) {
+                    for (tcs.array.items) |tc_v| {
+                        if (tc_v != .object) continue;
+                        const id_v = tc_v.object.get("id") orelse continue;
+                        const fn_v = tc_v.object.get("function") orelse continue;
+                        if (id_v != .string or fn_v != .object) continue;
+                        const name_v = fn_v.object.get("name") orelse continue;
+                        const args_v = fn_v.object.get("arguments") orelse continue;
+                        if (name_v != .string) continue;
+                        const args_str: []const u8 = if (args_v == .string) args_v.string else "{}";
+                        try tcs_buf.append(parent_alloc, .{
+                            .id = id_v.string,
+                            .name = name_v.string,
+                            .arguments_json = args_str,
+                        });
+                    }
+                }
+            }
+
+            if (tcs_buf.items.len > 0) {
+                try history.appendAssistantToolCalls(text, tcs_buf.items);
+            } else {
+                try history.appendAssistantText(text);
+            }
+        } else if (std.mem.eql(u8, role, "tool")) {
+            const id_v = item.object.get("tool_call_id") orelse continue;
+            const c_v = item.object.get("content") orelse continue;
+            if (id_v != .string or c_v != .string) continue;
+            try history.appendToolResult(id_v.string, c_v.string);
+        }
+    }
+}
+
 fn writeMessage(s: *std.json.Stringify, m: Message) !void {
     try s.beginObject();
     switch (m) {

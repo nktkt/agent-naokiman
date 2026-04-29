@@ -131,10 +131,10 @@ agent-naokiman/
 - [x] 危険コマンド検出（`rm -rf /`, `curl\|sh`, `dd if=`, `mkfs`, `chmod -R 777`, fork bomb, sudo, force-push 等）→ プロンプトに `⚠ DANGER:` 付与
 - [x] allowlist の永続化（`~/.config/agent-naokiman/allowed.json`、option 2 を選んだ exact pair が次回起動時に自動承認）
 
-### Phase 7 — TUI/REPL 改善（任意、数日）
-- [ ] マルチライン入力
-- [ ] Markdown 軽量レンダ
-- [ ] セッション保存/再開
+### Phase 7 — TUI/REPL 改善（部分完了）
+- [x] マルチライン入力（`<<<` ヒアドキュメント）
+- [x] セッション保存/再開（`/save`, `/load`, `/sessions`, `--resume <name>`）
+- [ ] Markdown 軽量レンダ（後続）
 
 ## 6. 技術選定
 

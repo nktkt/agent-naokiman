@@ -20,6 +20,7 @@ const SYSTEM_PROMPT =
 ;
 
 const MAX_TURNS: usize = 20;
+const HEREDOC_DELIM = "<<<";
 
 const CliOptions = struct {
     provider_kind: provider.Kind = .deepseek,
@@ -28,6 +29,7 @@ const CliOptions = struct {
     show_help: bool = false,
     auto_approve: bool = false,
     no_stream: bool = false,
+    resume_session: ?[]const u8 = null,
 };
 
 const USAGE =
@@ -36,18 +38,28 @@ const USAGE =
     \\options:
     \\  --provider <name>   deepseek (default), kimi, qwen
     \\  --model <id>        override the provider's default model
-    \\  -y, --yes           auto-approve all destructive tool calls (bash,
-    \\                      write_file, edit_file). Use only in trusted
-    \\                      automated contexts.
-    \\  --no-stream         disable SSE streaming, buffer the full response
+    \\  --resume <name>     load a saved session before starting
+    \\  -y, --yes           auto-approve all destructive tool calls
+    \\  --no-stream         disable SSE streaming
     \\  -h, --help          show this help
     \\
     \\modes:
     \\  no prompt   start an interactive REPL
     \\  prompt      run a single turn (positional argument)
     \\
+    \\REPL multiline input:
+    \\  enter `<<<` on a line by itself to start a multiline block, then
+    \\  another `<<<` line to submit it.
+    \\
+    \\REPL slash commands:
+    \\  /exit  /clear  /help
+    \\  /save <name>     save current session to ~/.config/agent-naokiman/sessions/<name>.json
+    \\  /load <name>     replace history with a saved session
+    \\  /sessions        list saved sessions
+    \\
     \\config:
     \\  ~/.config/agent-naokiman/.env  (DEEPSEEK_API_KEY / MOONSHOT_API_KEY / DASHSCOPE_API_KEY)
+    \\  ~/.config/agent-naokiman/sessions/  (saved chat histories)
     \\
 ;
 
@@ -99,10 +111,22 @@ pub fn main() !void {
 
     const stream_enabled = !opts.no_stream;
 
-    if (opts.prompt) |p| {
-        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, p);
+    var history = message.History.init(allocator);
+    defer history.deinit();
+
+    if (opts.resume_session) |name| {
+        loadSession(allocator, &history, name) catch |err| {
+            std.debug.print("error: cannot resume session '{s}': {s}\n", .{ name, @errorName(err) });
+            return err;
+        };
     } else {
-        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled);
+        try history.appendSystem(SYSTEM_PROMPT);
+    }
+
+    if (opts.prompt) |p| {
+        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p);
+    } else {
+        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled, &history);
     }
 }
 
@@ -125,6 +149,10 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             i += 1;
             if (i >= args.len) return error.MissingModelArg;
             opts.model_override = args[i];
+        } else if (std.mem.eql(u8, a, "--resume")) {
+            i += 1;
+            if (i >= args.len) return error.MissingResumeArg;
+            opts.resume_session = args[i];
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownFlag;
         } else {
@@ -142,14 +170,12 @@ fn runOneShot(
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
+    history: *message.History,
     prompt: []const u8,
 ) !void {
-    var history = message.History.init(allocator);
-    defer history.deinit();
-    try history.appendSystem(SYSTEM_PROMPT);
     try history.appendUser(prompt);
 
-    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, &history);
+    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history);
     if (!stream_enabled) try writeStdout(reply);
     try writeStdout("\n");
 }
@@ -161,55 +187,105 @@ fn runRepl(
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
+    history: *message.History,
 ) !void {
-    var history = message.History.init(allocator);
-    defer history.deinit();
-    try history.appendSystem(SYSTEM_PROMPT);
-
     try writeStdout("naokiman REPL — provider: ");
     try writeStdout(client.kind.label());
     try writeStdout(", model: ");
     try writeStdout(client.model);
     try writeStdout("\n");
-    try writeStdout("commands: /exit  /clear  /help\n\n");
+    try writeStdout("commands: /exit  /clear  /help  /save <name>  /load <name>  /sessions\n");
+    try writeStdout("multiline: type `<<<` on a line by itself, then another `<<<` to submit\n\n");
 
     while (true) {
         try writeStdout("you> ");
 
-        const maybe_line = stdin_reader.takeDelimiter('\n') catch |err| switch (err) {
-            error.StreamTooLong => {
-                try writeStdout("(input too long; turn skipped)\n");
-                continue;
-            },
-            else => return err,
-        };
-        const raw = maybe_line orelse {
+        const first = (try readLine(stdin_reader)) orelse {
             try writeStdout("\n");
             return;
         };
-        const line = std.mem.trim(u8, raw, " \t\r\n");
-        if (line.len == 0) continue;
+        const trimmed = std.mem.trim(u8, first, " \t\r\n");
+        if (trimmed.len == 0) continue;
 
-        if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) return;
-        if (std.mem.eql(u8, line, "/clear")) {
+        // Multiline heredoc
+        const submitted: []const u8 = if (std.mem.eql(u8, trimmed, HEREDOC_DELIM)) blk: {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer buf.deinit(allocator);
+            heredoc: while (true) {
+                try writeStdout("... ");
+                const next = (try readLine(stdin_reader)) orelse break :heredoc;
+                const next_trimmed = std.mem.trimRight(u8, next, "\r");
+                if (std.mem.eql(u8, std.mem.trim(u8, next_trimmed, " \t"), HEREDOC_DELIM)) break :heredoc;
+                if (buf.items.len > 0) try buf.append(allocator, '\n');
+                try buf.appendSlice(allocator, next_trimmed);
+            }
+            const owned = try buf.toOwnedSlice(allocator);
+            defer allocator.free(owned);
+            const dup = try allocator.dupe(u8, owned);
+            break :blk dup;
+        } else trimmed;
+
+        defer if (submitted.ptr != trimmed.ptr) allocator.free(submitted);
+
+        if (std.mem.eql(u8, submitted, "/exit") or std.mem.eql(u8, submitted, "/quit")) return;
+        if (std.mem.eql(u8, submitted, "/clear")) {
             history.clear();
             try history.appendSystem(SYSTEM_PROMPT);
             try writeStdout("(history cleared)\n");
             continue;
         }
-        if (std.mem.eql(u8, line, "/help")) {
-            try writeStdout("/exit  end the session\n/clear reset history\n/help  this message\n");
+        if (std.mem.eql(u8, submitted, "/help")) {
+            try writeStdout("/exit         end the session\n");
+            try writeStdout("/clear        reset history\n");
+            try writeStdout("/help         this message\n");
+            try writeStdout("/save <name>  save the current session\n");
+            try writeStdout("/load <name>  replace history with a saved session\n");
+            try writeStdout("/sessions     list saved sessions\n");
             continue;
         }
-        if (line[0] == '/') {
+        if (std.mem.eql(u8, submitted, "/sessions")) {
+            try listSessions(allocator);
+            continue;
+        }
+        if (std.mem.startsWith(u8, submitted, "/save ")) {
+            const name = std.mem.trim(u8, submitted["/save ".len..], " \t");
+            if (name.len == 0) {
+                try writeStdout("(usage: /save <name>)\n");
+                continue;
+            }
+            saveSession(allocator, history, name) catch |err| {
+                std.debug.print("error: save failed: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            try writeStdout("(saved as '");
+            try writeStdout(name);
+            try writeStdout("')\n");
+            continue;
+        }
+        if (std.mem.startsWith(u8, submitted, "/load ")) {
+            const name = std.mem.trim(u8, submitted["/load ".len..], " \t");
+            if (name.len == 0) {
+                try writeStdout("(usage: /load <name>)\n");
+                continue;
+            }
+            loadSession(allocator, history, name) catch |err| {
+                std.debug.print("error: load failed: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            try writeStdout("(loaded '");
+            try writeStdout(name);
+            try writeStdout("')\n");
+            continue;
+        }
+        if (submitted[0] == '/') {
             try writeStdout("(unknown command — try /help)\n");
             continue;
         }
 
-        try history.appendUser(line);
+        try history.appendUser(submitted);
 
         try writeStdout("naokiman> ");
-        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, &history) catch |err| {
+        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             continue;
         };
@@ -219,10 +295,17 @@ fn runRepl(
     }
 }
 
-/// Drives the tool-use loop until the model returns a stop. Appends every
-/// assistant turn (text and tool_calls) and every tool result to `history`,
-/// so callers can resume the conversation. Returns a slice into the history
-/// (the final assistant text), valid until the history is mutated again.
+fn readLine(stdin_reader: *std.Io.Reader) !?[]const u8 {
+    const maybe = stdin_reader.takeDelimiter('\n') catch |err| switch (err) {
+        error.StreamTooLong => {
+            try writeStdout("(input too long; line skipped)\n");
+            return "";
+        },
+        else => return err,
+    };
+    return maybe;
+}
+
 fn driveAgent(
     allocator: std.mem.Allocator,
     client: chat.Client,
@@ -301,4 +384,94 @@ fn writeStderr(bytes: []const u8) anyerror!void {
     var w = std.fs.File.stderr().writerStreaming(&buf);
     try w.interface.writeAll(bytes);
     try w.interface.flush();
+}
+
+// --- session save / load ---------------------------------------------------
+
+fn sessionsDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null) |xdg| {
+        defer allocator.free(xdg);
+        return std.fs.path.join(allocator, &.{ xdg, "agent-naokiman", "sessions" });
+    }
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.HomeNotSet;
+    defer allocator.free(home);
+    return std.fs.path.join(allocator, &.{ home, ".config", "agent-naokiman", "sessions" });
+}
+
+fn sessionPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    if (std.mem.indexOfAny(u8, name, "/\\") != null) return error.InvalidSessionName;
+    if (name.len == 0) return error.InvalidSessionName;
+
+    const dir = try sessionsDir(allocator);
+    defer allocator.free(dir);
+    const file = try std.fmt.allocPrint(allocator, "{s}.json", .{name});
+    defer allocator.free(file);
+    return std.fs.path.join(allocator, &.{ dir, file });
+}
+
+fn saveSession(allocator: std.mem.Allocator, history: *const message.History, name: []const u8) !void {
+    const path = try sessionPath(allocator, name);
+    defer allocator.free(path);
+
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try message.writeHistoryJson(&out.writer, history);
+
+    const file = try std.fs.cwd().createFile(path, .{ .mode = 0o600, .truncate = true });
+    defer file.close();
+    try file.writeAll(out.writer.buffered());
+}
+
+fn loadSession(allocator: std.mem.Allocator, history: *message.History, name: []const u8) !void {
+    const path = try sessionPath(allocator, name);
+    defer allocator.free(path);
+
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    if (stat.size == 0 or stat.size > 16 * 1024 * 1024) return error.InvalidSessionFile;
+
+    const body = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(body);
+    _ = try file.readAll(body);
+
+    try message.loadHistoryJson(history, body, allocator);
+    if (history.items.items.len == 0 or history.items.items[0] != .system) {
+        // Ensure a system prompt is at the front for sane behavior.
+        const items_copy = history.items.items;
+        _ = items_copy;
+        try history.appendSystem(SYSTEM_PROMPT);
+    }
+}
+
+fn listSessions(allocator: std.mem.Allocator) !void {
+    const dir_path = try sessionsDir(allocator);
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try writeStdout("(no sessions saved yet)\n");
+            return;
+        },
+        else => return err,
+    };
+    defer dir.close();
+
+    var it = dir.iterate();
+    var count: usize = 0;
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const stem = entry.name[0 .. entry.name.len - ".json".len];
+        try writeStdout("  ");
+        try writeStdout(stem);
+        try writeStdout("\n");
+        count += 1;
+    }
+    if (count == 0) try writeStdout("(no sessions saved yet)\n");
 }

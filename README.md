@@ -2,7 +2,7 @@
 
 A multi-provider coding agent CLI written in [Zig](https://ziglang.org), inspired by [Claude Code](https://www.anthropic.com/claude-code) and similar tools.
 
-> **Status**: Early prototype. Phases 0–6 are working — HTTP transport, multi-turn chat, an interactive REPL, a tool-use loop with seven core tools, provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, per-tool approval prompts before destructive operations, and SSE streaming so tokens appear as the model emits them. TUI polish, dangerous-command detection, and persistent allowlists are still TODO.
+> **Status**: Early prototype with all core phases (0–7) working — HTTP transport, multi-turn chat, an interactive REPL with multi-line input and saveable sessions, a tool-use loop with seven core tools (`read_file` / `write_file` / `edit_file` / `bash` / `ls` / `glob` / `grep`), provider switching across DeepSeek / Moonshot Kimi / Alibaba Qwen, per-tool approval prompts with danger detection and a persistent allowlist, and SSE streaming so tokens appear as the model emits them.
 
 ## Goals
 
@@ -91,16 +91,32 @@ Interactive REPL (multi-turn, history retained):
 
 ```sh
 $ naokiman
-naokiman REPL — model: deepseek-chat
-commands: /exit  /clear  /help
+naokiman REPL — provider: deepseek, model: deepseek-chat
+commands: /exit  /clear  /help  /save <name>  /load <name>  /sessions
+multiline: type `<<<` on a line by itself, then another `<<<` to submit
 
 you> My favorite number is 42.
 naokiman> Nice. 42 is a classic.
 
-you> What is my favorite number?
-naokiman> Your favorite number is 42.
+you> /save chat1
+(saved as 'chat1')
 
 you> /exit
+
+$ naokiman --resume chat1
+you> What is my favorite number?
+naokiman> Your favorite number is 42.
+```
+
+Multi-line input (paste a stack trace, snippet, etc.):
+
+```
+you> <<<
+... fn main() {
+...     // ...
+... }
+... <<<
+naokiman> ...
 ```
 
 Tool use:
@@ -166,6 +182,7 @@ Read-only tools (`read_file`, `ls`, `glob`, `grep`) never require approval.
 - **Phase 4** — Multi-provider switching (DeepSeek, Kimi, Qwen) ✅
 - **Phase 5** — SSE streaming (token-by-token output) ✅
 - **Phase 6** — Approval prompts + danger detection (`rm -rf /`, `curl|sh`, etc.) + persistent allowlist ✅
+- **Phase 7** — REPL polish: multiline heredoc input, `/save`/`/load`/`/sessions`, `--resume <name>` ✅ (Markdown rendering still TODO)
 - **Phase 4** — Multi-provider abstraction (Kimi, Qwen)
 - **Phase 5** — Streaming responses (SSE)
 - **Phase 6** — Permission prompts, sandbox-style guardrails
