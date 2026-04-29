@@ -398,6 +398,25 @@ fn writeStyledLine(prefix: []const u8, text: []const u8, code: []const u8) !void
     try writeStdout("\n");
 }
 
+/// Big ANSI Shadow lettering for "naokiman". Six rows tall, ~67 columns wide.
+const BANNER_ROWS = [_][]const u8{
+    "███╗   ██╗ █████╗  ██████╗ ██╗  ██╗██╗███╗   ███╗ █████╗ ███╗   ██╗",
+    "████╗  ██║██╔══██╗██╔═══██╗██║ ██╔╝██║████╗ ████║██╔══██╗████╗  ██║",
+    "██╔██╗ ██║███████║██║   ██║█████╔╝ ██║██╔████╔██║███████║██╔██╗ ██║",
+    "██║╚██╗██║██╔══██║██║   ██║██╔═██╗ ██║██║╚██╔╝██║██╔══██║██║╚██╗██║",
+    "██║ ╚████║██║  ██║╚██████╔╝██║  ██╗██║██║ ╚═╝ ██║██║  ██║██║ ╚████║",
+    "╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
+};
+
+const BANNER_GRADIENT = [_][]const u8{
+    style.bold_blue,
+    style.bold_blue,
+    style.bold_cyan,
+    style.bold_cyan,
+    style.fg_cyan,
+    style.fg_cyan,
+};
+
 fn printBanner(client: chat.Client) !void {
     const bar = style.open(style.bold_blue);
     const accent = style.open(style.bold_cyan);
@@ -405,33 +424,45 @@ fn printBanner(client: chat.Client) !void {
     const subtle = style.open(style.fg_cyan);
     const reset = style.close();
 
-    // Line 1: title
-    try writeStdout(bar);
-    try writeStdout("▎ ");
-    try writeStdout(reset);
+    try writeStdout("\n");
+    for (BANNER_ROWS, BANNER_GRADIENT) |row, code| {
+        try writeStdout("  ");
+        try writeStdout(style.open(code));
+        try writeStdout(row);
+        try writeStdout(reset);
+        try writeStdout("\n");
+    }
+    try writeStdout("\n");
+
+    // Subtitle: provider · model
+    try writeStdout("  ");
     try writeStdout(accent);
-    try writeStdout("naokiman");
+    try writeStdout("a coding agent");
     try writeStdout(reset);
     try writeStdout(sub);
     try writeStdout("  ·  ");
+    try writeStdout(reset);
+    try writeStdout(accent);
     try writeStdout(client.kind.label());
+    try writeStdout(reset);
+    try writeStdout(sub);
     try writeStdout("  ·  ");
+    try writeStdout(reset);
+    try writeStdout(accent);
     try writeStdout(client.model);
     try writeStdout(reset);
-    try writeStdout("\n");
+    try writeStdout("\n\n");
 
-    // Line 2: slash commands
+    // Slash commands and multiline hint, with the bar style we use elsewhere
     try writeStdout(bar);
-    try writeStdout("▎ ");
+    try writeStdout("  ▎ ");
     try writeStdout(reset);
     try writeStdout(subtle);
     try writeStdout("/exit  /clear  /help  /save <name>  /load <name>  /sessions");
     try writeStdout(reset);
     try writeStdout("\n");
-
-    // Line 3: multiline hint
     try writeStdout(bar);
-    try writeStdout("▎ ");
+    try writeStdout("  ▎ ");
     try writeStdout(reset);
     try writeStdout(subtle);
     try writeStdout("multiline: ");
