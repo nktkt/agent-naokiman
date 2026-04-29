@@ -3,6 +3,7 @@ const std = @import("std");
 pub const read_file = @import("read_file.zig");
 pub const write_file = @import("write_file.zig");
 pub const edit_file = @import("edit_file.zig");
+pub const multi_edit = @import("multi_edit.zig");
 pub const bash = @import("bash.zig");
 pub const ls = @import("ls.zig");
 pub const glob = @import("glob.zig");
@@ -26,6 +27,7 @@ pub const all: []const Tool = &.{
     read_file.tool,
     write_file.tool,
     edit_file.tool,
+    multi_edit.tool,
     bash.tool,
     ls.tool,
     glob.tool,

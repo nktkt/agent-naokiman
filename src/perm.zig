@@ -9,7 +9,8 @@ const ALLOWLIST_FILENAME = "allowed.json";
 pub fn isDestructive(tool_name: []const u8) bool {
     return std.mem.eql(u8, tool_name, "bash") or
         std.mem.eql(u8, tool_name, "write_file") or
-        std.mem.eql(u8, tool_name, "edit_file");
+        std.mem.eql(u8, tool_name, "edit_file") or
+        std.mem.eql(u8, tool_name, "multi_edit");
 }
 
 /// Returns a short reason string when the bash command matches a known

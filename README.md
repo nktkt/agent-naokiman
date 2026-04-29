@@ -162,6 +162,7 @@ Available tools (the LLM picks them automatically):
 | `read_file(path)` | Read a UTF-8 text file (1 MiB cap) |
 | `write_file(path, content)` | Create or overwrite a file (4 MiB cap, parents auto-created) |
 | `edit_file(path, old_string, new_string)` | Atomic exact-match search/replace (must be unique) |
+| `multi_edit(path, edits[])` | Apply several `{old_string, new_string}` edits atomically (each match must be unique at its turn) |
 | `bash(command)` | Run via `/bin/sh -c` (64 KiB output cap) |
 | `ls(path)` | List immediate directory entries |
 | `glob(pattern, root)` | Walk tree and match `*` / `**` / `?` |
@@ -245,6 +246,7 @@ agent-naokiman/
     │   ├── read_file.zig
     │   ├── write_file.zig  # 4 MiB cap, parents auto-created
     │   ├── edit_file.zig   # atomic via .tmp + rename, unique-match required
+    │   ├── multi_edit.zig  # batch atomic edits, each match must be unique
     │   ├── bash.zig        # /bin/sh -c, 64 KiB output cap
     │   ├── ls.zig
     │   ├── glob.zig        # *, **, ? matcher (anchored full-path match)

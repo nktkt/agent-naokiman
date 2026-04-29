@@ -108,7 +108,7 @@ pub fn main() !void {
         },
     };
 
-    const client = chat.Client.fromSelection(allocator, sel);
+    var client = chat.Client.fromSelection(allocator, sel);
 
     const tools_json = try tools.renderToolsJson(allocator);
     defer allocator.free(tools_json);
@@ -147,7 +147,7 @@ pub fn main() !void {
     if (opts.prompt) |p| {
         try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p);
     } else {
-        try runRepl(allocator, client, tools_json, &policy, sr, stream_enabled, &history, system_prompt);
+        try runRepl(allocator, &client, tools_json, &policy, sr, stream_enabled, &history, system_prompt, &cfg);
     }
 }
 
@@ -250,15 +250,16 @@ fn runOneShot(
 
 fn runRepl(
     allocator: std.mem.Allocator,
-    client: chat.Client,
+    client: *chat.Client,
     tools_json: []const u8,
     policy: *perm.Policy,
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
     history: *message.History,
     system_prompt: []const u8,
+    cfg: *config.Config,
 ) !void {
-    try printBanner(client);
+    try printBanner(client.*);
 
     while (true) {
         try writePrompt("you> ", style.bold_cyan);
@@ -298,12 +299,52 @@ fn runRepl(
             continue;
         }
         if (std.mem.eql(u8, submitted, "/help")) {
-            try writeStdout("/exit         end the session\n");
-            try writeStdout("/clear        reset history\n");
-            try writeStdout("/help         this message\n");
-            try writeStdout("/save <name>  save the current session\n");
-            try writeStdout("/load <name>  replace history with a saved session\n");
-            try writeStdout("/sessions     list saved sessions\n");
+            try writeStdout("/exit             end the session\n");
+            try writeStdout("/clear            reset history\n");
+            try writeStdout("/help             this message\n");
+            try writeStdout("/save <name>      save the current session\n");
+            try writeStdout("/load <name>      replace history with a saved session\n");
+            try writeStdout("/sessions         list saved sessions\n");
+            try writeStdout("/model <id>       switch model for the current provider\n");
+            try writeStdout("/provider <name>  switch provider (deepseek / kimi / qwen)\n");
+            continue;
+        }
+        if (std.mem.startsWith(u8, submitted, "/model ")) {
+            const new_model = std.mem.trim(u8, submitted["/model ".len..], " \t");
+            if (new_model.len == 0) {
+                try writeStdout("(usage: /model <id>)\n");
+                continue;
+            }
+            const owned = cfg.arena.allocator().dupe(u8, new_model) catch |err| {
+                std.debug.print("error: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            client.model = owned;
+            try writeStdout("(switched model to '");
+            try writeStdout(owned);
+            try writeStdout("')\n");
+            continue;
+        }
+        if (std.mem.startsWith(u8, submitted, "/provider ")) {
+            const name = std.mem.trim(u8, submitted["/provider ".len..], " \t");
+            const new_kind = provider.Kind.fromString(name) orelse {
+                try writeStdout("(unknown provider — try deepseek, kimi, or qwen)\n");
+                continue;
+            };
+            const sel = provider.select(cfg, new_kind, null) catch |err| switch (err) {
+                error.MissingApiKey => {
+                    try writeStdout("(error: ");
+                    try writeStdout(provider.missingKeyEnvName(new_kind));
+                    try writeStdout(" not set)\n");
+                    continue;
+                },
+            };
+            client.* = chat.Client.fromSelection(allocator, sel);
+            try writeStdout("(switched to ");
+            try writeStdout(client.kind.label());
+            try writeStdout(" · model ");
+            try writeStdout(client.model);
+            try writeStdout(")\n");
             continue;
         }
         if (std.mem.eql(u8, submitted, "/sessions")) {
@@ -348,7 +389,7 @@ fn runRepl(
         try history.appendUser(submitted);
 
         try writePrompt("naokiman> ", style.bold_blue);
-        const reply = driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
+        const reply = driveAgent(allocator, client.*, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
             try writeStyledLine("error: ", @errorName(err), style.bold_red);
             continue;
         };
