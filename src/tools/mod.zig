@@ -49,6 +49,15 @@ pub fn renderToolsJson(allocator: std.mem.Allocator) ![]u8 {
 
     var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
     try s.beginArray();
+    try appendBuiltinsToArray(&s, &out.writer);
+    try s.endArray();
+
+    return out.toOwnedSlice();
+}
+
+/// Append every built-in tool as a function object inside an already-open
+/// JSON array. The caller is responsible for `beginArray` / `endArray`.
+pub fn appendBuiltinsToArray(s: *std.json.Stringify, out: *std.Io.Writer) !void {
     for (all) |t| {
         try s.beginObject();
         try s.objectField("type");
@@ -61,12 +70,9 @@ pub fn renderToolsJson(allocator: std.mem.Allocator) ![]u8 {
         try s.write(t.description);
         try s.objectField("parameters");
         try s.beginWriteRaw();
-        try out.writer.writeAll(t.parameters_schema_json);
+        try out.writeAll(t.parameters_schema_json);
         s.endWriteRaw();
         try s.endObject();
         try s.endObject();
     }
-    try s.endArray();
-
-    return out.toOwnedSlice();
 }

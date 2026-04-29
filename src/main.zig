@@ -8,6 +8,7 @@ const perm = @import("perm.zig");
 const style = @import("style.zig");
 const interrupt = @import("interrupt.zig");
 const render = @import("render.zig");
+const mcp = @import("mcp.zig");
 
 fn installSigintHandler() void {
     interrupt.install();
@@ -122,7 +123,16 @@ pub fn main() !void {
 
     var client = chat.Client.fromSelection(allocator, sel);
 
-    const tools_json = try tools.renderToolsJson(allocator);
+    var mcp_mgr = mcp.Manager.init(allocator);
+    defer mcp_mgr.deinit();
+    if (try resolveConfigDir(allocator)) |cd| {
+        defer allocator.free(cd);
+        mcp_mgr.loadConfig(cd) catch |err| {
+            std.debug.print("warning: mcp.json load failed: {s}\n", .{@errorName(err)});
+        };
+    }
+
+    const tools_json = try renderAllToolsJson(allocator, &mcp_mgr);
     defer allocator.free(tools_json);
 
     var stdin_buf: [16 * 1024]u8 = undefined;
@@ -161,10 +171,32 @@ pub fn main() !void {
     installSigintHandler();
 
     if (opts.prompt) |p| {
-        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p);
+        try runOneShot(allocator, client, tools_json, &policy, sr, stream_enabled, &history, p, &mcp_mgr);
     } else {
-        try runRepl(allocator, &client, tools_json, &policy, sr, stream_enabled, &history, system_prompt, &cfg);
+        try runRepl(allocator, &client, tools_json, &policy, sr, stream_enabled, &history, system_prompt, &cfg, &mcp_mgr);
     }
+}
+
+fn resolveConfigDir(allocator: std.mem.Allocator) !?[]u8 {
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null) |xdg| {
+        return try std.fs.path.join(allocator, &.{ xdg, "agent-naokiman" });
+    }
+    if (std.process.getEnvVarOwned(allocator, "HOME") catch null) |home| {
+        defer allocator.free(home);
+        return try std.fs.path.join(allocator, &.{ home, ".config", "agent-naokiman" });
+    }
+    return null;
+}
+
+fn renderAllToolsJson(allocator: std.mem.Allocator, mcp_mgr: *const mcp.Manager) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try s.beginArray();
+    try tools.appendBuiltinsToArray(&s, &out.writer);
+    try mcp_mgr.appendToolsToArray(&s, &out.writer);
+    try s.endArray();
+    return out.toOwnedSlice();
 }
 
 /// Build the effective system prompt: BASE_SYSTEM_PROMPT plus optional content
@@ -258,10 +290,11 @@ fn runOneShot(
     stream_enabled: bool,
     history: *message.History,
     prompt: []const u8,
+    mcp_mgr: *mcp.Manager,
 ) !void {
     try history.appendUser(prompt);
 
-    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history);
+    const reply = try driveAgent(allocator, client, tools_json, policy, stdin_reader, stream_enabled, history, mcp_mgr);
     if (!stream_enabled) try writeStdout(reply);
     try writeStdout("\n");
 }
@@ -276,6 +309,7 @@ fn runRepl(
     history: *message.History,
     system_prompt: []const u8,
     cfg: *config.Config,
+    mcp_mgr: *mcp.Manager,
 ) !void {
     try printBanner(client.*);
 
@@ -407,7 +441,7 @@ fn runRepl(
         try history.appendUser(submitted);
 
         try writePrompt("naokiman> ", style.bold_blue);
-        const reply = driveAgent(allocator, client.*, tools_json, policy, stdin_reader, stream_enabled, history) catch |err| {
+        const reply = driveAgent(allocator, client.*, tools_json, policy, stdin_reader, stream_enabled, history, mcp_mgr) catch |err| {
             try writeStyledLine("error: ", @errorName(err), style.bold_red);
             continue;
         };
@@ -440,6 +474,7 @@ fn driveAgent(
     stdin_reader: *std.Io.Reader,
     stream_enabled: bool,
     history: *message.History,
+    mcp_mgr: *mcp.Manager,
 ) ![]const u8 {
     interrupt.clear();
     var prev_sig: ?[]u8 = null;
@@ -537,6 +572,16 @@ fn driveAgent(
                             .{ tc.name, @errorName(err) },
                         ) catch return error.OutOfMemory;
                     };
+                }
+                if (mcp.isQualifiedName(tc.name)) {
+                    const maybe = mcp_mgr.execute(allocator, tc.name, tc.arguments_json) catch |err| {
+                        break :blk std.fmt.allocPrint(
+                            allocator,
+                            "error: MCP tool '{s}' failed: {s}",
+                            .{ tc.name, @errorName(err) },
+                        ) catch return error.OutOfMemory;
+                    };
+                    if (maybe) |r| break :blk r;
                 }
                 break :blk std.fmt.allocPrint(
                     allocator,

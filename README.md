@@ -184,6 +184,31 @@ When `prompt_tokens` exceeds 25 k, the agent automatically summarizes the older 
 
 Press `Ctrl+C` during a streaming response and the SSE loop unwinds at the next chunk; whatever has streamed so far is kept in history. The flag clears between turns so the next prompt works normally.
 
+### MCP servers
+
+`agent-naokiman` is also an [MCP](https://modelcontextprotocol.io) host: it can spawn external tool servers and expose their tools to the LLM alongside the built-in seven.
+
+Define servers in `~/.config/agent-naokiman/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    }
+  }
+}
+```
+
+On startup, every server is spawned, an `initialize` handshake runs, and `tools/list` populates the catalogue. Tools are exposed to the LLM under the qualified name `mcp__<server>__<tool>`. When the LLM calls one, the request is routed back to the matching server over JSON-RPC stdio. Approval prompts apply only to the built-in destructive tools — MCP tools are passed through (you trust the servers you configured). Server crashes are logged but don't kill the agent.
+
+Only the `tools` capability is supported in this build; `resources`, `prompts`, and `sampling` are not yet implemented.
+
 ### Markdown rendering
 
 Streamed assistant output is passed through a small line-buffered renderer that highlights:
@@ -258,6 +283,7 @@ agent-naokiman/
     ├── style.zig           # ANSI helpers, NO_COLOR / --no-color aware
     ├── render.zig          # markdown-lite stream renderer (`code`, **bold**, fences, headers)
     ├── interrupt.zig       # SIGINT handler for Ctrl+C abort
+    ├── mcp.zig             # MCP client: spawn servers, initialize, tools/list, tools/call
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig
