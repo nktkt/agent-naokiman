@@ -184,6 +184,21 @@ When `prompt_tokens` exceeds 25 k, the agent automatically summarizes the older 
 
 Press `Ctrl+C` during a streaming response and the SSE loop unwinds at the next chunk; whatever has streamed so far is kept in history. The flag clears between turns so the next prompt works normally.
 
+### Markdown rendering
+
+Streamed assistant output is passed through a small line-buffered renderer that highlights:
+
+- inline `` `code` `` spans → cyan
+- `**bold**` → bold
+- `# headers`, `## subheaders` → bold (cyan for top level)
+- ``` ```code fences``` ``` → fence delimiters dim, contents in cyan
+
+The renderer activates only when ANSI styling is on (TTY + no `NO_COLOR`). Pass `--no-md` to disable it explicitly while keeping color elsewhere.
+
+### Loop detection
+
+If the model calls the same tool with the same arguments three turns in a row, the agent host appends a "loop detected" message to the conversation and skips the third execution. This breaks pathological retry loops where a model gets fixated on a failing call.
+
 ### Permissions
 
 `bash`, `write_file`, and `edit_file` require interactive approval before each call. When you run `naokiman` in a terminal you'll see:
@@ -241,6 +256,8 @@ agent-naokiman/
     ├── provider.zig        # Provider kind enum + per-provider config selection
     ├── perm.zig            # Approval policy + interactive prompt
     ├── style.zig           # ANSI helpers, NO_COLOR / --no-color aware
+    ├── render.zig          # markdown-lite stream renderer (`code`, **bold**, fences, headers)
+    ├── interrupt.zig       # SIGINT handler for Ctrl+C abort
     ├── tools/
     │   ├── mod.zig         # Tool interface, registry, JSON-schema rendering
     │   ├── read_file.zig

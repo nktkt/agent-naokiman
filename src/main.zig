@@ -7,9 +7,19 @@ const tools = @import("tools/mod.zig");
 const perm = @import("perm.zig");
 const style = @import("style.zig");
 const interrupt = @import("interrupt.zig");
+const render = @import("render.zig");
 
 fn installSigintHandler() void {
     interrupt.install();
+}
+
+// Global so the streaming TextDeltaFn pointer can reach it without changing
+// the chat.zig callback signature. CLI is single-threaded.
+var g_renderer: render.Renderer = .{};
+var g_render_alloc: std.mem.Allocator = undefined;
+
+fn streamSink(bytes: []const u8) anyerror!void {
+    return g_renderer.write(g_render_alloc, bytes, writeStdout);
 }
 
 const BASE_SYSTEM_PROMPT =
@@ -41,6 +51,7 @@ const CliOptions = struct {
     auto_approve: bool = false,
     no_stream: bool = false,
     no_color: bool = false,
+    no_md: bool = false,
     resume_session: ?[]const u8 = null,
 };
 
@@ -54,6 +65,7 @@ const USAGE =
     \\  -y, --yes           auto-approve all destructive tool calls
     \\  --no-stream         disable SSE streaming
     \\  --no-color          disable ANSI color output (also honors NO_COLOR=1)
+    \\  --no-md             disable markdown-lite rendering of streamed text
     \\  -h, --help          show this help
     \\
     \\modes:
@@ -121,6 +133,10 @@ pub fn main() !void {
     const interactive = stdin_file.isTty();
     style.detect(std.fs.File.stdout().isTty());
     if (opts.no_color) style.force(false);
+
+    g_render_alloc = allocator;
+    g_renderer.enabled = !opts.no_md;
+    defer g_renderer.deinit(allocator);
 
     var policy = perm.Policy.init(allocator, opts.auto_approve, interactive);
     defer policy.deinit();
@@ -209,6 +225,8 @@ fn parseArgs(args: []const [:0]u8) !CliOptions {
             opts.no_stream = true;
         } else if (std.mem.eql(u8, a, "--no-color")) {
             opts.no_color = true;
+        } else if (std.mem.eql(u8, a, "--no-md")) {
+            opts.no_md = true;
         } else if (std.mem.eql(u8, a, "--provider")) {
             i += 1;
             if (i >= args.len) return error.MissingProviderArg;
@@ -410,6 +428,10 @@ fn readLine(stdin_reader: *std.Io.Reader) !?[]const u8 {
     return maybe;
 }
 
+/// How many consecutive identical tool calls are allowed before we abort
+/// the agent loop and tell the model to stop.
+const MAX_CONSECUTIVE_REPEATS: usize = 3;
+
 fn driveAgent(
     allocator: std.mem.Allocator,
     client: chat.Client,
@@ -420,6 +442,9 @@ fn driveAgent(
     history: *message.History,
 ) ![]const u8 {
     interrupt.clear();
+    var prev_sig: ?[]u8 = null;
+    defer if (prev_sig) |s| allocator.free(s);
+    var prev_count: usize = 0;
     var turn: usize = 0;
     while (turn < MAX_TURNS) : (turn += 1) {
         if (history.items.items.len > COMPACT_KEEP_TAIL + 2) {
@@ -428,10 +453,12 @@ fn driveAgent(
             // at the bottom of the loop instead.
         }
 
+        g_renderer.reset(g_render_alloc);
         var resp = if (stream_enabled)
-            try client.chatStreaming(history, tools_json, writeStdout)
+            try client.chatStreaming(history, tools_json, streamSink)
         else
             try client.chat(history, tools_json);
+        try g_renderer.flushFinal(g_render_alloc, writeStdout);
         defer resp.deinit();
 
         if (resp.interrupted) {
@@ -461,6 +488,36 @@ fn driveAgent(
             try writeStdout(")");
             try writeStdout(style.close());
             try writeStdout("\n");
+
+            // Detect a stuck loop: if the same tool is called with the
+            // same arguments many times in a row, refuse and force the
+            // model to either change approach or give up.
+            const sig = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ tc.name, tc.arguments_json });
+            errdefer allocator.free(sig);
+            if (prev_sig) |p| {
+                if (std.mem.eql(u8, p, sig)) {
+                    prev_count += 1;
+                } else {
+                    allocator.free(p);
+                    prev_sig = sig;
+                    prev_count = 1;
+                }
+            } else {
+                prev_sig = sig;
+                prev_count = 1;
+            }
+            if (prev_count > 1 and sig.ptr != prev_sig.?.ptr) allocator.free(sig);
+
+            if (prev_count >= MAX_CONSECUTIVE_REPEATS) {
+                const msg =
+                    "loop detected: this exact tool call has now been issued " ++
+                    "three times in a row. The agent host is refusing further " ++
+                    "calls. Stop, summarize what you found, and ask the user " ++
+                    "for guidance instead of retrying.";
+                try history.appendToolResult(tc.id, msg);
+                try writeStyledLine("[loop detected, aborting tool calls for this turn]", "", style.bold_yellow);
+                continue;
+            }
 
             const approved = try policy.approve(tc.name, tc.arguments_json, stdin_reader, writeStdout);
             if (!approved) {
